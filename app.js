@@ -178,34 +178,34 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
     // ── ed trans ───────────────────────────────────────────────────────────
     } else if (subcommand === 'trans') {
       if (!args) {
-        await reply('❌ Usage: `/ed trans [Slack message link]`\nRight-click any message → Copy link, then paste it here.');
+        await reply('❌ Usage:\n• `/ed trans [Slack message link]` — translate a message by link\n• `/ed trans [any text]` — translate text directly');
         return;
       }
 
-      // Parse Slack message link: .../archives/CHANNEL_ID/pTIMESTAMP
+      let textToTranslate = args;
+
+      // If it looks like a Slack message link, fetch the message text first
       const match = args.match(/\/archives\/([A-Z0-9]+)\/p(\d{10})(\d{6})/);
-      if (!match) {
-        await reply('❌ Invalid link. Right-click a Slack message → *Copy link*, then paste it here.');
-        return;
+      if (match) {
+        const channelId = match[1];
+        const ts = `${match[2]}.${match[3]}`;
+
+        const result = await client.conversations.history({
+          channel: channelId,
+          latest: ts,
+          inclusive: true,
+          limit: 1,
+        });
+
+        const message = result.messages?.[0];
+        if (!message?.text) {
+          await reply('❌ Could not fetch that message. Make sure the bot is invited to that channel.\n\nTip: for DM messages, copy the text directly and use `/ed trans [paste text]` instead.');
+          return;
+        }
+        textToTranslate = message.text;
       }
 
-      const channelId = match[1];
-      const ts = `${match[2]}.${match[3]}`;
-
-      const result = await client.conversations.history({
-        channel: channelId,
-        latest: ts,
-        inclusive: true,
-        limit: 1,
-      });
-
-      const message = result.messages?.[0];
-      if (!message?.text) {
-        await reply('❌ Could not fetch that message. Make sure the bot is invited to that channel.');
-        return;
-      }
-
-      const translated = await translate(message.text, 'English');
+      const translated = await translate(textToTranslate, 'English');
       await reply(`🌐 *Translation (only you see this):*\n${translated}`);
 
     // ── unknown subcommand ─────────────────────────────────────────────────
