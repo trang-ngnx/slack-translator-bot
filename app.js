@@ -329,21 +329,26 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
       const json = await googleTranslateRaw(messageText, targetCode);
       const translated = json[0].map(chunk => chunk[0]).join('');
 
-      // Fetch sender's profile to post with their name and avatar
-      const profileRes = await client.users.info({ user: command.user_id });
-      const profile = profileRes.user?.profile;
-      const displayName = profile?.display_name || profile?.real_name || 'Unknown';
-      const avatarUrl = profile?.image_72;
+      if (isDM) {
+        // Can't post into a user-to-user DM — show translation for manual copy-paste
+        await reply(`📋 *Translation (→ ${targetLabel}) — copy and send this yourself:*\n${translated}`);
+      } else {
+        // Fetch sender's profile to post with their name and avatar
+        const profileRes = await client.users.info({ user: command.user_id });
+        const profile = profileRes.user?.profile;
+        const displayName = profile?.display_name || profile?.real_name || 'Unknown';
+        const avatarUrl = profile?.image_72;
 
-      await client.chat.postMessage({
-        channel: command.channel_id,
-        text: translated,
-        username: displayName,
-        icon_url: avatarUrl,
-        ...(command.thread_ts ? { thread_ts: command.thread_ts } : {}),
-      });
+        await client.chat.postMessage({
+          channel: command.channel_id,
+          text: translated,
+          username: displayName,
+          icon_url: avatarUrl,
+          ...(command.thread_ts ? { thread_ts: command.thread_ts } : {}),
+        });
 
-      await reply(`✅ *Sent (→ ${targetLabel})*\n*Original:* ${messageText}\n*Translated:* ${translated}`);
+        await reply(`✅ *Sent (→ ${targetLabel})*\n*Original:* ${messageText}\n*Translated:* ${translated}`);
+      }
 
     // ── ed trans ───────────────────────────────────────────────────────────
     } else if (subcommand === 'trans') {
