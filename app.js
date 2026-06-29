@@ -1,6 +1,8 @@
 require('dotenv').config();
 const { App } = require('@slack/bolt');
 const https = require('https');
+const fs = require('fs');
+const path = require('path');
 
 // ── Config ─────────────────────────────────────────────────────────────────
 // Comma-separated channel IDs to monitor (public/private channels), e.g. C012AB3CD,C045EF6GH
@@ -12,13 +14,30 @@ const MONITORED_CHANNELS = (process.env.MONITORED_CHANNEL_IDS || '')
 const MONITORED_DM_USERS = (process.env.MONITORED_DM_USER_IDS || '')
   .split(',').map(s => s.trim()).filter(Boolean);
 
-// Your Slack user ID (e.g. U012AB3CD) — only you get ephemeral translations
-const MY_USER_ID = process.env.MY_SLACK_USER_ID;
-
 // Per-channel outgoing language: JSON like {"C012AB3CD":"Japanese","C045EF6GH":"French"}
 // Falls back to OUTGOING_LANGUAGE or "English" if not set
 const CHANNEL_LANGUAGES = JSON.parse(process.env.CHANNEL_LANGUAGES || '{}');
 const DEFAULT_OUTGOING_LANG = process.env.OUTGOING_LANGUAGE || 'English';
+
+// ── Subscriber store ───────────────────────────────────────────────────────
+// Persists the list of users who opted in via /ed join
+const STORE_PATH = path.join(__dirname, 'subscribers.json');
+
+function loadSubscribers() {
+  try {
+    if (fs.existsSync(STORE_PATH)) return new Set(JSON.parse(fs.readFileSync(STORE_PATH)));
+  } catch {}
+  // Seed from env var on first run
+  const seed = (process.env.SUBSCRIBER_USER_IDS || process.env.MY_SLACK_USER_ID || '')
+    .split(',').map(s => s.trim()).filter(Boolean);
+  return new Set(seed);
+}
+
+function saveSubscribers() {
+  fs.writeFileSync(STORE_PATH, JSON.stringify([...subscribers]));
+}
+
+const subscribers = loadSubscribers();
 
 // ── Clients ────────────────────────────────────────────────────────────────
 const app = new App({
@@ -103,32 +122,33 @@ async function detectChannelLanguage(client, channelId) {
 // ── Incoming: auto-translate messages in monitored channels ────────────────
 app.event('message', async ({ event, client, logger }) => {
   try {
-    // Skip bot messages, edits, deletes, and your own messages
-    if (event.subtype || event.bot_id || event.user === MY_USER_ID) return;
+    // Skip bot messages, edits, deletes, and messages from subscribers themselves
+    if (event.subtype || event.bot_id || subscribers.has(event.user)) return;
     if (!event.text?.trim()) return;
 
     const isMonitoredChannel = MONITORED_CHANNELS.includes(event.channel);
-    // DMs have channel_type === 'im'; the sender is event.user
     const isMonitoredDM = event.channel_type === 'im' && MONITORED_DM_USERS.includes(event.user);
 
     if (!isMonitoredChannel && !isMonitoredDM) return;
 
     const translated = await translate(event.text, 'English');
 
-    if (isMonitoredDM) {
-      // In DMs, ephemeral messages aren't supported — post as a bot DM to yourself instead
-      await client.chat.postMessage({
-        channel: MY_USER_ID, // sends a DM to you from the bot
-        text: `🌐 *[Translation from DM]*\n${translated}`,
-      });
-    } else {
-      // In channels, use ephemeral (only you see it, inline)
-      await client.chat.postEphemeral({
-        channel: event.channel,
-        user: MY_USER_ID,
-        text: `🌐 *[Translation]*\n${translated}`,
-        ...(event.thread_ts ? { thread_ts: event.thread_ts } : {}),
-      });
+    // Send translation to every subscribed user
+    for (const userId of subscribers) {
+      if (isMonitoredDM) {
+        // Ephemeral not supported in DMs — send a bot DM instead
+        await client.chat.postMessage({
+          channel: userId,
+          text: `🌐 *[Translation from DM]*\n${translated}`,
+        });
+      } else {
+        await client.chat.postEphemeral({
+          channel: event.channel,
+          user: userId,
+          text: `🌐 *[Translation]*\n${translated}`,
+          ...(event.thread_ts ? { thread_ts: event.thread_ts } : {}),
+        });
+      }
     }
   } catch (err) {
     logger.error('Error translating incoming message:', err);
@@ -143,7 +163,7 @@ app.event('message', async ({ event, client, logger }) => {
 app.command('/ed', async ({ command, ack, client, logger }) => {
   await ack();
 
-  const USAGE = 'Available commands:\n• `/ed send [your message]` — auto-detect channel language, translate and post\n• `/ed trans [Slack message link]` — translate a message privately';
+  const USAGE = 'Available commands:\n• `/ed join` — subscribe to auto-translations in monitored channels\n• `/ed leave` — unsubscribe from auto-translations\n• `/ed send [your message]` — translate and post to channel\n• `/ed trans [link or text]` — translate a message privately';
 
   // Ephemeral messages don't work in DMs — use a bot DM to the user instead
   const isDM = command.channel_id.startsWith('D');
@@ -159,9 +179,30 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
     const [subcommand, ...rest] = (command.text || '').trim().split(/\s+/);
     const args = rest.join(' ').trim();
 
+    // ── ed join ────────────────────────────────────────────────────────────
+    if (subcommand === 'join') {
+      if (subscribers.has(command.user_id)) {
+        await reply('✅ You\'re already subscribed to auto-translations.');
+      } else {
+        subscribers.add(command.user_id);
+        saveSubscribers();
+        await reply('✅ Subscribed! You\'ll now receive translations for messages in monitored channels.');
+      }
+
+    // ── ed leave ───────────────────────────────────────────────────────────
+    } else if (subcommand === 'leave') {
+      if (!subscribers.has(command.user_id)) {
+        await reply('You\'re not currently subscribed.');
+      } else {
+        subscribers.delete(command.user_id);
+        saveSubscribers();
+        await reply('👋 Unsubscribed. You\'ll no longer receive auto-translations.');
+      }
+
     // ── ed send ────────────────────────────────────────────────────────────
-    if (subcommand === 'send') {
+    } else if (subcommand === 'send') {
       if (!args) {
+
         await reply('❌ Usage: `/ed send [your message]`\nOptionally force a language: `/ed send Japanese: your message`');
         return;
       }

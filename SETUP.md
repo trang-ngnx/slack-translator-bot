@@ -61,8 +61,7 @@ In your app settings → **Slash Commands** → **Create New Command**:
 3. Add environment variables under the **Variables** tab:
    - `SLACK_BOT_TOKEN`
    - `SLACK_SIGNING_SECRET`
-   - `GEMINI_API_KEY` — from https://aistudio.google.com → Get API key (free, no credit card)
-   - `MY_SLACK_USER_ID`
+   - `SUBSCRIBER_USER_IDS` — comma-separated Slack user IDs to seed as initial subscribers (users can also self-register with `/ed join`)
    - `MONITORED_CHANNEL_IDS`
    - `MONITORED_DM_USER_IDS` (optional — user IDs of people whose DMs you want translated)
    - `CHANNEL_LANGUAGES` (optional — e.g. `{"C012AB3CD":"Japanese"}`)
@@ -100,11 +99,21 @@ In each channel you want to monitor or use `/translate` in, type:
 
 | What you want | What to do |
 |---|---|
-| Read a translation (channels) | Automatic — appears below each message, only you see it |
+| Subscribe to auto-translations | `/ed join` |
+| Unsubscribe | `/ed leave` |
+| Read a translation (channels) | Automatic after joining — appears below each message, only subscribers see it |
 | Read a translation (DMs) | Automatic — bot sends you a separate DM with the translation |
 | Translate a specific message | Right-click message → **Copy link** → `/ed trans [paste link]` |
-| Post a message in the channel's language | `/ed send Hello I'll join in 5 minutes` — auto-detects language from recent messages |
+| Translate text directly | `/ed trans [paste text]` |
+| Post a message in the channel's language | `/ed send Hello I'll join in 5 minutes` — auto-detects language |
 | Force a specific language | `/ed send Japanese: Hello I'll join in 5 minutes` |
+
+## For new users / colleagues
+
+Anyone in the workspace can use the bot — no setup needed on their end:
+1. Find the bot in Slack (search "INT Translator" or whatever you named it)
+2. Type `/ed join` in any channel or DM to start receiving auto-translations
+3. Type `/ed leave` to stop at any time
 
 ---
 
