@@ -1,57 +1,50 @@
 require('dotenv').config();
 const { App } = require('@slack/bolt');
 const https = require('https');
-const fs = require('fs');
-const path = require('path');
+const Redis = require('ioredis');
 
 // ── Config ─────────────────────────────────────────────────────────────────
 const CHANNEL_LANGUAGES = JSON.parse(process.env.CHANNEL_LANGUAGES || '{}');
 const DEFAULT_OUTGOING_LANG = process.env.OUTGOING_LANGUAGE || 'English';
 
-// ── Persistent stores ──────────────────────────────────────────────────────
-const DATA_DIR = process.env.DATA_DIR || __dirname;
+// ── Redis persistent store ─────────────────────────────────────────────────
+const redis = new Redis(process.env.REDIS_URL);
 
-function loadStore(filename, envSeed) {
-  const filePath = path.join(DATA_DIR, filename);
-  try {
-    if (fs.existsSync(filePath)) return new Set(JSON.parse(fs.readFileSync(filePath)));
-  } catch {}
-  const seed = (envSeed || '').split(',').map(s => s.trim()).filter(Boolean);
-  return new Set(seed);
+// Keys used in Redis
+const KEYS = {
+  subscribers:            'subscribers',
+  monitoredChannels:      'monitored_channels',
+  monitoredDmUsers:       'monitored_dm_users',
+  userIncomingLang:       'user_incoming_lang',
+  userChannelOutgoingLang:'user_channel_outgoing_lang',
+};
+
+// Set helpers (stored as Redis sets)
+async function setAdd(key, value)    { await redis.sadd(key, value); }
+async function setRemove(key, value) { await redis.srem(key, value); }
+async function setHas(key, value)    { return (await redis.sismember(key, value)) === 1; }
+async function setAll(key)           { return new Set(await redis.smembers(key)); }
+
+// Seed a Redis set from comma-separated env var if the set is empty
+async function seedSet(key, envValue) {
+  const count = await redis.scard(key);
+  if (count === 0 && envValue) {
+    const members = envValue.split(',').map(s => s.trim()).filter(Boolean);
+    if (members.length) await redis.sadd(key, ...members);
+  }
 }
 
-function saveStore(filename, set) {
-  fs.writeFileSync(path.join(DATA_DIR, filename), JSON.stringify([...set]));
+// Hash helpers (stored as Redis hashes)
+async function hashSet(key, field, value) { await redis.hset(key, field, value); }
+async function hashGet(key, field)        { return redis.hget(key, field); }
+async function hashDel(key, field)        { await redis.hdel(key, field); }
+
+// Seed initial data from env vars (only runs when Redis keys are empty)
+async function seedFromEnv() {
+  await seedSet(KEYS.subscribers,       process.env.SUBSCRIBER_USER_IDS);
+  await seedSet(KEYS.monitoredChannels, process.env.MONITORED_CHANNEL_IDS);
+  await seedSet(KEYS.monitoredDmUsers,  process.env.MONITORED_DM_USER_IDS);
 }
-
-function loadMap(filename) {
-  const filePath = path.join(DATA_DIR, filename);
-  try {
-    if (fs.existsSync(filePath)) return new Map(JSON.parse(fs.readFileSync(filePath)));
-  } catch {}
-  return new Map();
-}
-
-function saveMap(filename, map) {
-  fs.writeFileSync(path.join(DATA_DIR, filename), JSON.stringify([...map]));
-}
-
-// Users who receive auto-translations (/ed join / /ed leave)
-const subscribers = loadStore('subscribers.json', process.env.SUBSCRIBER_USER_IDS);
-
-// Channels being monitored (/ed watch / /ed unwatch)
-const monitoredChannels = loadStore('channels.json', process.env.MONITORED_CHANNEL_IDS);
-
-// DM users being monitored — only works for DMs sent TO THE BOT, not user-to-user DMs
-const monitoredDmUsers = loadStore('dm_users.json', process.env.MONITORED_DM_USER_IDS);
-
-// Per-user incoming language preference: userId → lang code (e.g. 'vi', 'en')
-// Set via /ed lang [language]. Defaults to 'en'.
-const userIncomingLang = loadMap('user_incoming_lang.json');
-
-// Per-user per-channel outgoing language: "userId:channelId" → lang code
-// Set via /ed send [language] (no message). Used for all subsequent /ed send in that channel.
-const userChannelOutgoingLang = loadMap('user_channel_outgoing_lang.json');
 
 // ── Clients ────────────────────────────────────────────────────────────────
 const app = new App({
@@ -142,15 +135,17 @@ app.event('message', async ({ event, client, logger }) => {
     if (event.subtype || event.bot_id) return;
     if (!event.text?.trim()) return;
 
-    const isMonitoredChannel = monitoredChannels.has(event.channel);
-    const isMonitoredDM = event.channel_type === 'im' && monitoredDmUsers.has(event.user);
+    const isMonitoredChannel = await setHas(KEYS.monitoredChannels, event.channel);
+    const isMonitoredDM = event.channel_type === 'im' && await setHas(KEYS.monitoredDmUsers, event.user);
 
     if (!isMonitoredChannel && !isMonitoredDM) return;
 
+    const allSubscribers = await setAll(KEYS.subscribers);
+
     // Send translation to every subscribed user except the sender
-    for (const userId of subscribers) {
+    for (const userId of allSubscribers) {
       if (userId === event.user) continue;
-      const targetLang = userIncomingLang.get(userId) || 'en';
+      const targetLang = await hashGet(KEYS.userIncomingLang, userId) || 'en';
       const translated = await translate(event.text, targetLang);
 
       if (isMonitoredDM) {
@@ -198,35 +193,32 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
 
     // ── ed join ────────────────────────────────────────────────────────────
     if (subcommand === 'join') {
-      if (subscribers.has(command.user_id)) {
+      if (await setHas(KEYS.subscribers, command.user_id)) {
         await reply('✅ You\'re already subscribed to auto-translations.');
       } else {
-        subscribers.add(command.user_id);
-        saveStore('subscribers.json', subscribers);
+        await setAdd(KEYS.subscribers, command.user_id);
         await reply('✅ Subscribed! You\'ll now receive translations for messages in monitored channels.');
       }
 
     // ── ed leave ───────────────────────────────────────────────────────────
     } else if (subcommand === 'leave') {
-      if (!subscribers.has(command.user_id)) {
+      if (!await setHas(KEYS.subscribers, command.user_id)) {
         await reply('You\'re not currently subscribed.');
       } else {
-        subscribers.delete(command.user_id);
-        saveStore('subscribers.json', subscribers);
+        await setRemove(KEYS.subscribers, command.user_id);
         await reply('👋 Unsubscribed. You\'ll no longer receive auto-translations.');
       }
 
     // ── ed lang ────────────────────────────────────────────────────────────
     } else if (subcommand === 'lang') {
       if (!args) {
-        const current = userIncomingLang.get(command.user_id) || 'en';
-        await reply(`Your current incoming translation language is *${current}*.\nUsage: \`/ed lang [language]\` — e.g. \`/ed lang Vietnamese\``);
+        const current = await hashGet(KEYS.userIncomingLang, command.user_id) || 'en';
+        await reply(`Your current incoming translation language is *${current}*.\nUsage: \`/ed lang [language or code]\` — e.g. \`/ed lang vi\` or \`/ed lang Vietnamese\``);
         return;
       }
       const langCode = getLangCode(args);
-      userIncomingLang.set(command.user_id, langCode);
-      saveMap('user_incoming_lang.json', userIncomingLang);
-      await reply(`✅ Done! Auto-translations will now be delivered to you in *${args}* (\`${langCode}\`).`);
+      await hashSet(KEYS.userIncomingLang, command.user_id, langCode);
+      await reply(`✅ Done! Auto-translations will now be delivered to you in *${langCode}*.`);
 
     // ── ed watch ───────────────────────────────────────────────────────────
     } else if (subcommand === 'watch') {
@@ -234,11 +226,10 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
         await reply('❌ Run `/ed watch` inside a channel, not a DM.');
         return;
       }
-      if (monitoredChannels.has(command.channel_id)) {
+      if (await setHas(KEYS.monitoredChannels, command.channel_id)) {
         await reply('✅ This channel is already being monitored.');
       } else {
-        monitoredChannels.add(command.channel_id);
-        saveStore('channels.json', monitoredChannels);
+        await setAdd(KEYS.monitoredChannels, command.channel_id);
         await reply('✅ This channel is now monitored — subscribers will receive auto-translations for new messages here.');
       }
 
@@ -248,16 +239,14 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
         await reply('❌ Run `/ed unwatch` inside a channel, not a DM.');
         return;
       }
-      if (!monitoredChannels.has(command.channel_id)) {
+      if (!await setHas(KEYS.monitoredChannels, command.channel_id)) {
         await reply('This channel is not currently being monitored.');
       } else {
-        monitoredChannels.delete(command.channel_id);
-        saveStore('channels.json', monitoredChannels);
+        await setRemove(KEYS.monitoredChannels, command.channel_id);
         await reply('✅ This channel has been removed from monitoring.');
       }
 
     // ── ed dm-watch ────────────────────────────────────────────────────────
-    // ⚠️ Only works for DMs sent TO THE BOT — not user-to-user DMs (Slack limitation)
     } else if (subcommand === 'dm-watch') {
       const userMatch = args.match(/<@([A-Z0-9]+)(?:\|[^>]+)?>/);
       if (!userMatch) {
@@ -265,11 +254,10 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
         return;
       }
       const targetUserId = userMatch[1];
-      if (monitoredDmUsers.has(targetUserId)) {
+      if (await setHas(KEYS.monitoredDmUsers, targetUserId)) {
         await reply(`✅ <@${targetUserId}> is already being monitored.`);
       } else {
-        monitoredDmUsers.add(targetUserId);
-        saveStore('dm_users.json', monitoredDmUsers);
+        await setAdd(KEYS.monitoredDmUsers, targetUserId);
         await reply(`✅ Done. When <@${targetUserId}> sends a message to the bot, it will be translated for all subscribers.\n⚠️ Reminder: the bot cannot read DMs between you and them directly — only messages they send to the bot.`);
       }
 
@@ -281,11 +269,10 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
         return;
       }
       const targetUserId = userMatch[1];
-      if (!monitoredDmUsers.has(targetUserId)) {
+      if (!await setHas(KEYS.monitoredDmUsers, targetUserId)) {
         await reply(`<@${targetUserId}> is not currently being monitored.`);
       } else {
-        monitoredDmUsers.delete(targetUserId);
-        saveStore('dm_users.json', monitoredDmUsers);
+        await setRemove(KEYS.monitoredDmUsers, targetUserId);
         await reply(`✅ Stopped monitoring DMs from <@${targetUserId}>.`);
       }
 
@@ -303,9 +290,8 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
       if (isLangOnly) {
         const langCode = getLangCode(args);
         const key = `${command.user_id}:${command.channel_id}`;
-        userChannelOutgoingLang.set(key, langCode);
-        saveMap('user_channel_outgoing_lang.json', userChannelOutgoingLang);
-        await reply(`✅ Default outgoing language for this channel set to *${args}* (\`${langCode}\`). Your next \`/ed send [message]\` will translate to ${args}.`);
+        await hashSet(KEYS.userChannelOutgoingLang, key, langCode);
+        await reply(`✅ Default outgoing language for this channel set to *${langCode}*. Your next \`/ed send [message]\` will translate to ${langCode}.`);
         return;
       }
 
@@ -324,7 +310,7 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
       // Use user's saved outgoing language for this channel
       if (!targetCode) {
         const key = `${command.user_id}:${command.channel_id}`;
-        targetCode = userChannelOutgoingLang.get(key) || null;
+        targetCode = await hashGet(KEYS.userChannelOutgoingLang, key) || null;
       }
 
       // Auto-detect from recent channel messages
@@ -404,8 +390,10 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
 
 // ── Start ──────────────────────────────────────────────────────────────────
 (async () => {
+  await seedFromEnv();
   const port = process.env.PORT || 3000;
   await app.start(port);
+  const channels = await setAll(KEYS.monitoredChannels);
   console.log(`⚡️ Slack Translator Bot is running on port ${port}`);
-  console.log(`📡 Monitoring channels: ${[...monitoredChannels].join(', ') || '(none configured)'}`);
+  console.log(`📡 Monitoring channels: ${[...channels].join(', ') || '(none configured)'}`);
 })();
