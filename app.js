@@ -5,39 +5,36 @@ const fs = require('fs');
 const path = require('path');
 
 // ── Config ─────────────────────────────────────────────────────────────────
-// Comma-separated channel IDs to monitor (public/private channels), e.g. C012AB3CD,C045EF6GH
-const MONITORED_CHANNELS = (process.env.MONITORED_CHANNEL_IDS || '')
-  .split(',').map(s => s.trim()).filter(Boolean);
-
-// Comma-separated DM user IDs to monitor, e.g. U012AB3CD,U045EF6GH
-// These are the OTHER person's user IDs, not yours
-const MONITORED_DM_USERS = (process.env.MONITORED_DM_USER_IDS || '')
-  .split(',').map(s => s.trim()).filter(Boolean);
+// Per-channel outgoing language: JSON like {"C012AB3CD":"Japanese","C045EF6GH":"French"}
+// Falls back to OUTGOING_LANGUAGE or "English" if not set
 
 // Per-channel outgoing language: JSON like {"C012AB3CD":"Japanese","C045EF6GH":"French"}
 // Falls back to OUTGOING_LANGUAGE or "English" if not set
 const CHANNEL_LANGUAGES = JSON.parse(process.env.CHANNEL_LANGUAGES || '{}');
 const DEFAULT_OUTGOING_LANG = process.env.OUTGOING_LANGUAGE || 'English';
 
-// ── Subscriber store ───────────────────────────────────────────────────────
-// Persists the list of users who opted in via /ed join
-const STORE_PATH = path.join(__dirname, 'subscribers.json');
-
-function loadSubscribers() {
+// ── Persistent stores ──────────────────────────────────────────────────────
+function loadStore(filename, envSeed) {
+  const filePath = path.join(__dirname, filename);
   try {
-    if (fs.existsSync(STORE_PATH)) return new Set(JSON.parse(fs.readFileSync(STORE_PATH)));
+    if (fs.existsSync(filePath)) return new Set(JSON.parse(fs.readFileSync(filePath)));
   } catch {}
-  // Seed from env var on first run
-  const seed = (process.env.SUBSCRIBER_USER_IDS || process.env.MY_SLACK_USER_ID || '')
-    .split(',').map(s => s.trim()).filter(Boolean);
+  const seed = (envSeed || '').split(',').map(s => s.trim()).filter(Boolean);
   return new Set(seed);
 }
 
-function saveSubscribers() {
-  fs.writeFileSync(STORE_PATH, JSON.stringify([...subscribers]));
+function saveStore(filename, set) {
+  fs.writeFileSync(path.join(__dirname, filename), JSON.stringify([...set]));
 }
 
-const subscribers = loadSubscribers();
+// Users who receive auto-translations (/ed join / /ed leave)
+const subscribers = loadStore('subscribers.json', process.env.SUBSCRIBER_USER_IDS);
+
+// Channels being monitored (/ed watch / /ed unwatch)
+const monitoredChannels = loadStore('channels.json', process.env.MONITORED_CHANNEL_IDS);
+
+// DM users being monitored — only works for DMs sent TO THE BOT, not user-to-user DMs
+const monitoredDmUsers = loadStore('dm_users.json', process.env.MONITORED_DM_USER_IDS);
 
 // ── Clients ────────────────────────────────────────────────────────────────
 const app = new App({
@@ -126,8 +123,8 @@ app.event('message', async ({ event, client, logger }) => {
     if (event.subtype || event.bot_id || subscribers.has(event.user)) return;
     if (!event.text?.trim()) return;
 
-    const isMonitoredChannel = MONITORED_CHANNELS.includes(event.channel);
-    const isMonitoredDM = event.channel_type === 'im' && MONITORED_DM_USERS.includes(event.user);
+    const isMonitoredChannel = monitoredChannels.has(event.channel);
+    const isMonitoredDM = event.channel_type === 'im' && monitoredDmUsers.has(event.user);
 
     if (!isMonitoredChannel && !isMonitoredDM) return;
 
@@ -163,7 +160,7 @@ app.event('message', async ({ event, client, logger }) => {
 app.command('/ed', async ({ command, ack, client, logger }) => {
   await ack();
 
-  const USAGE = 'Available commands:\n• `/ed join` — subscribe to auto-translations in monitored channels\n• `/ed leave` — unsubscribe from auto-translations\n• `/ed send [your message]` — translate and post to channel\n• `/ed trans [link or text]` — translate a message privately';
+  const USAGE = 'Available commands:\n• `/ed join` — subscribe to auto-translations\n• `/ed leave` — unsubscribe\n• `/ed watch` — add this channel to auto-translation monitoring\n• `/ed unwatch` — remove this channel from monitoring\n• `/ed dm-watch @user` — monitor DMs from a user sent to the bot\n• `/ed dm-unwatch @user` — stop monitoring DMs from a user\n• `/ed send [message]` — translate and post to channel\n• `/ed trans [link or text]` — translate privately';
 
   // Ephemeral messages don't work in DMs — use a bot DM to the user instead
   const isDM = command.channel_id.startsWith('D');
@@ -197,6 +194,67 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
         subscribers.delete(command.user_id);
         saveSubscribers();
         await reply('👋 Unsubscribed. You\'ll no longer receive auto-translations.');
+      }
+
+    // ── ed watch ───────────────────────────────────────────────────────────
+    } else if (subcommand === 'watch') {
+      if (isDM) {
+        await reply('❌ Run `/ed watch` inside a channel, not a DM.');
+        return;
+      }
+      if (monitoredChannels.has(command.channel_id)) {
+        await reply('✅ This channel is already being monitored.');
+      } else {
+        monitoredChannels.add(command.channel_id);
+        saveStore('channels.json', monitoredChannels);
+        await reply('✅ This channel is now monitored — subscribers will receive auto-translations for new messages here.');
+      }
+
+    // ── ed unwatch ─────────────────────────────────────────────────────────
+    } else if (subcommand === 'unwatch') {
+      if (isDM) {
+        await reply('❌ Run `/ed unwatch` inside a channel, not a DM.');
+        return;
+      }
+      if (!monitoredChannels.has(command.channel_id)) {
+        await reply('This channel is not currently being monitored.');
+      } else {
+        monitoredChannels.delete(command.channel_id);
+        saveStore('channels.json', monitoredChannels);
+        await reply('✅ This channel has been removed from monitoring.');
+      }
+
+    // ── ed dm-watch ────────────────────────────────────────────────────────
+    // ⚠️ Only works for DMs sent TO THE BOT — not user-to-user DMs (Slack limitation)
+    } else if (subcommand === 'dm-watch') {
+      const userMatch = args.match(/<@([A-Z0-9]+)(?:\|[^>]+)?>/);
+      if (!userMatch) {
+        await reply('❌ Usage: `/ed dm-watch @username`\n⚠️ Note: this only translates messages that person sends *to the bot*, not their DMs with you directly (Slack API limitation).');
+        return;
+      }
+      const targetUserId = userMatch[1];
+      if (monitoredDmUsers.has(targetUserId)) {
+        await reply(`✅ <@${targetUserId}> is already being monitored.`);
+      } else {
+        monitoredDmUsers.add(targetUserId);
+        saveStore('dm_users.json', monitoredDmUsers);
+        await reply(`✅ Done. When <@${targetUserId}> sends a message to the bot, it will be translated for all subscribers.\n⚠️ Reminder: the bot cannot read DMs between you and them directly — only messages they send to the bot.`);
+      }
+
+    // ── ed dm-unwatch ──────────────────────────────────────────────────────
+    } else if (subcommand === 'dm-unwatch') {
+      const userMatch = args.match(/<@([A-Z0-9]+)(?:\|[^>]+)?>/);
+      if (!userMatch) {
+        await reply('❌ Usage: `/ed dm-unwatch @username`');
+        return;
+      }
+      const targetUserId = userMatch[1];
+      if (!monitoredDmUsers.has(targetUserId)) {
+        await reply(`<@${targetUserId}> is not currently being monitored.`);
+      } else {
+        monitoredDmUsers.delete(targetUserId);
+        saveStore('dm_users.json', monitoredDmUsers);
+        await reply(`✅ Stopped monitoring DMs from <@${targetUserId}>.`);
       }
 
     // ── ed send ────────────────────────────────────────────────────────────

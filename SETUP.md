@@ -97,23 +97,41 @@ In each channel you want to monitor or use `/translate` in, type:
 
 ## Usage
 
+### Subscription
 | What you want | What to do |
 |---|---|
 | Subscribe to auto-translations | `/ed join` |
 | Unsubscribe | `/ed leave` |
-| Read a translation (channels) | Automatic after joining — appears below each message, only subscribers see it |
-| Read a translation (DMs) | Automatic — bot sends you a separate DM with the translation |
-| Translate a specific message | Right-click message → **Copy link** → `/ed trans [paste link]` |
+
+### Channel monitoring
+| What you want | What to do |
+|---|---|
+| Monitor this channel (run inside the channel) | `/ed watch` |
+| Stop monitoring this channel | `/ed unwatch` |
+
+### DM monitoring
+> ⚠️ **Limitation**: Slack does not allow bots to read DMs between two users. DM monitoring only works when the other person messages **the bot directly** — not when they message you.
+
+| What you want | What to do |
+|---|---|
+| Monitor DMs sent to the bot by someone | `/ed dm-watch @username` |
+| Stop monitoring | `/ed dm-unwatch @username` |
+
+### Translation
+| What you want | What to do |
+|---|---|
+| Translate a message by link | Right-click message → **Copy link** → `/ed trans [paste link]` |
 | Translate text directly | `/ed trans [paste text]` |
-| Post a message in the channel's language | `/ed send Hello I'll join in 5 minutes` — auto-detects language |
+| Post a message in the channel's language | `/ed send Hello I'll join in 5 minutes` |
 | Force a specific language | `/ed send Japanese: Hello I'll join in 5 minutes` |
 
 ## For new users / colleagues
 
-Anyone in the workspace can use the bot — no setup needed on their end:
-1. Find the bot in Slack (search "INT Translator" or whatever you named it)
-2. Type `/ed join` in any channel or DM to start receiving auto-translations
-3. Type `/ed leave` to stop at any time
+Anyone in the workspace can use the bot — no setup needed:
+1. Find the bot in Slack (search "INT Translator" or your bot name)
+2. `/ed join` — subscribe to auto-translations
+3. Go to each channel you want monitored → `/ed watch`
+4. `/ed leave` to unsubscribe anytime
 
 ---
 
