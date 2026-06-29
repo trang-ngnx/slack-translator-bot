@@ -28,7 +28,7 @@ const app = new App({
   socketMode: process.env.SOCKET_MODE === 'true',
 });
 
-// ── Translation helper (Google Translate — free, no API key needed) ────────
+// ── Translation helpers ────────────────────────────────────────────────────
 const LANG_CODES = {
   english: 'en', japanese: 'ja', french: 'fr', spanish: 'es',
   german: 'de', korean: 'ko', chinese: 'zh', vietnamese: 'vi',
@@ -37,6 +37,31 @@ const LANG_CODES = {
 
 function getLangCode(name) {
   return LANG_CODES[name.toLowerCase()] || name.toLowerCase().slice(0, 2);
+}
+
+// Protect Slack entities from being mangled by translation (ported from joycetran002/slack-translator)
+// Replaces mentions, links, emoji, and code blocks with ‹0›, ‹1›... placeholders
+const PROTECT_PATTERNS = [
+  /```[\s\S]*?```/g,   // code blocks
+  /`[^`]+`/g,          // inline code
+  /<[^\s][^>]*>/g,     // mentions (<@U...>), channels (<#C...>), links (<https://...>)
+  /:[a-z0-9_+\-']+:/g, // emoji shortcodes :thumbsup:
+];
+
+function protect(text) {
+  const stash = [];
+  let result = text;
+  for (const pattern of PROTECT_PATTERNS) {
+    result = result.replace(pattern, (match) => {
+      stash.push(match);
+      return `‹${stash.length - 1}›`; // ‹N›
+    });
+  }
+  return { masked: result, stash };
+}
+
+function restore(masked, stash) {
+  return masked.replace(/‹(\d+)›/g, (_, i) => stash[Number(i)] ?? _);
 }
 
 function googleTranslateRaw(text, targetCode) {
@@ -55,8 +80,10 @@ function googleTranslateRaw(text, targetCode) {
 
 async function translate(text, targetLanguage) {
   const targetCode = getLangCode(targetLanguage);
-  const json = await googleTranslateRaw(text, targetCode);
-  return json[0].map(chunk => chunk[0]).join('');
+  const { masked, stash } = protect(text);
+  const json = await googleTranslateRaw(masked, targetCode);
+  const translatedMasked = json[0].map(chunk => chunk[0]).join('');
+  return restore(translatedMasked, stash);
 }
 
 // Fetch recent non-English messages from a channel and detect their language.
