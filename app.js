@@ -5,11 +5,6 @@ const fs = require('fs');
 const path = require('path');
 
 // ── Config ─────────────────────────────────────────────────────────────────
-// Per-channel outgoing language: JSON like {"C012AB3CD":"Japanese","C045EF6GH":"French"}
-// Falls back to OUTGOING_LANGUAGE or "English" if not set
-
-// Per-channel outgoing language: JSON like {"C012AB3CD":"Japanese","C045EF6GH":"French"}
-// Falls back to OUTGOING_LANGUAGE or "English" if not set
 const CHANNEL_LANGUAGES = JSON.parse(process.env.CHANNEL_LANGUAGES || '{}');
 const DEFAULT_OUTGOING_LANG = process.env.OUTGOING_LANGUAGE || 'English';
 
