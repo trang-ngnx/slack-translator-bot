@@ -313,8 +313,8 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
         targetCode = await hashGet(KEYS.userChannelOutgoingLang, key) || null;
       }
 
-      // Auto-detect from recent channel messages
-      if (!targetCode) {
+      // Auto-detect from recent channel messages (skip in DMs — bot has no access)
+      if (!targetCode && !isDM) {
         targetCode = await detectChannelLanguage(client, command.channel_id);
       }
 
