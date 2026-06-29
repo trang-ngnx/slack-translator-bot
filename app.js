@@ -118,6 +118,16 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
 
   const USAGE = 'Available commands:\n• `/ed send [your message]` — auto-detect channel language, translate and post\n• `/ed trans [Slack message link]` — translate a message privately';
 
+  // Ephemeral messages don't work in DMs — use a bot DM to the user instead
+  const isDM = command.channel_id.startsWith('D');
+  async function reply(text) {
+    if (isDM) {
+      await client.chat.postMessage({ channel: command.user_id, text });
+    } else {
+      await client.chat.postEphemeral({ channel: command.channel_id, user: command.user_id, text });
+    }
+  }
+
   try {
     const [subcommand, ...rest] = (command.text || '').trim().split(/\s+/);
     const args = rest.join(' ').trim();
@@ -125,11 +135,7 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
     // ── ed send ────────────────────────────────────────────────────────────
     if (subcommand === 'send') {
       if (!args) {
-        await client.chat.postEphemeral({
-          channel: command.channel_id,
-          user: command.user_id,
-          text: '❌ Usage: `/ed send [your message]`\nOptionally force a language: `/ed send Japanese: your message`',
-        });
+        await reply('❌ Usage: `/ed send [your message]`\nOptionally force a language: `/ed send Japanese: your message`');
         return;
       }
 
@@ -167,31 +173,19 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
         ...(command.thread_ts ? { thread_ts: command.thread_ts } : {}),
       });
 
-      await client.chat.postEphemeral({
-        channel: command.channel_id,
-        user: command.user_id,
-        text: `✅ *Sent (→ ${targetLabel})*\n*Original:* ${messageText}\n*Translated:* ${translated}`,
-      });
+      await reply(`✅ *Sent (→ ${targetLabel})*\n*Original:* ${messageText}\n*Translated:* ${translated}`);
 
     // ── ed trans ───────────────────────────────────────────────────────────
     } else if (subcommand === 'trans') {
       if (!args) {
-        await client.chat.postEphemeral({
-          channel: command.channel_id,
-          user: command.user_id,
-          text: '❌ Usage: `/ed trans [Slack message link]`\nRight-click any message → Copy link, then paste it here.',
-        });
+        await reply('❌ Usage: `/ed trans [Slack message link]`\nRight-click any message → Copy link, then paste it here.');
         return;
       }
 
       // Parse Slack message link: .../archives/CHANNEL_ID/pTIMESTAMP
       const match = args.match(/\/archives\/(C[A-Z0-9]+)\/p(\d{10})(\d{6})/);
       if (!match) {
-        await client.chat.postEphemeral({
-          channel: command.channel_id,
-          user: command.user_id,
-          text: '❌ Invalid link. Right-click a Slack message → *Copy link*, then paste it here.',
-        });
+        await reply('❌ Invalid link. Right-click a Slack message → *Copy link*, then paste it here.');
         return;
       }
 
@@ -207,37 +201,20 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
 
       const message = result.messages?.[0];
       if (!message?.text) {
-        await client.chat.postEphemeral({
-          channel: command.channel_id,
-          user: command.user_id,
-          text: '❌ Could not fetch that message. Make sure the bot is invited to that channel.',
-        });
+        await reply('❌ Could not fetch that message. Make sure the bot is invited to that channel.');
         return;
       }
 
       const translated = await translate(message.text, 'English');
-
-      await client.chat.postEphemeral({
-        channel: command.channel_id,
-        user: command.user_id,
-        text: `🌐 *Translation (only you see this):*\n${translated}`,
-      });
+      await reply(`🌐 *Translation (only you see this):*\n${translated}`);
 
     // ── unknown subcommand ─────────────────────────────────────────────────
     } else {
-      await client.chat.postEphemeral({
-        channel: command.channel_id,
-        user: command.user_id,
-        text: `❌ Unknown command \`${subcommand}\`.\n${USAGE}`,
-      });
+      await reply(`❌ Unknown command \`${subcommand}\`.\n${USAGE}`);
     }
   } catch (err) {
     logger.error('Error in /ed:', err);
-    await client.chat.postEphemeral({
-      channel: command.channel_id,
-      user: command.user_id,
-      text: `❌ Error: ${err.message}`,
-    });
+    await reply(`❌ Error: ${err.message}`);
   }
 });
 
