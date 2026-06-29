@@ -1,6 +1,6 @@
 require('dotenv').config();
 const { App } = require('@slack/bolt');
-const Anthropic = require('@anthropic-ai/sdk');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
 
 // ── Config ─────────────────────────────────────────────────────────────────
 // Comma-separated channel IDs to monitor (public/private channels), e.g. C012AB3CD,C045EF6GH
@@ -28,19 +28,15 @@ const app = new App({
   socketMode: process.env.SOCKET_MODE === 'true',
 });
 
-const claude = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const gemini = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
 
 // ── Translation helper ─────────────────────────────────────────────────────
 async function translate(text, targetLanguage) {
-  const response = await claude.messages.create({
-    model: 'claude-haiku-4-5-20251001',
-    max_tokens: 1024,
-    messages: [{
-      role: 'user',
-      content: `Translate the following text to ${targetLanguage}. Return ONLY the translated text with no explanations, labels, or extra punctuation:\n\n${text}`,
-    }],
-  });
-  return response.content[0].text.trim();
+  const result = await gemini.generateContent(
+    `Translate the following text to ${targetLanguage}. Return ONLY the translated text with no explanations, labels, or extra punctuation:\n\n${text}`
+  );
+  return result.response.text().trim();
 }
 
 // ── Incoming: auto-translate messages in monitored channels ────────────────
