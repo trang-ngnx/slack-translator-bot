@@ -344,5 +344,5 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
   const port = process.env.PORT || 3000;
   await app.start(port);
   console.log(`⚡️ Slack Translator Bot is running on port ${port}`);
-  console.log(`📡 Monitoring channels: ${MONITORED_CHANNELS.join(', ') || '(none configured)'}`);
+  console.log(`📡 Monitoring channels: ${[...monitoredChannels].join(', ') || '(none configured)'}`);
 })();
