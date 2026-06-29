@@ -1,6 +1,6 @@
 require('dotenv').config();
 const { App } = require('@slack/bolt');
-const { GoogleGenerativeAI } = require('@google/generative-ai');
+const https = require('https');
 
 // ── Config ─────────────────────────────────────────────────────────────────
 // Comma-separated channel IDs to monitor (public/private channels), e.g. C012AB3CD,C045EF6GH
@@ -28,15 +28,36 @@ const app = new App({
   socketMode: process.env.SOCKET_MODE === 'true',
 });
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const gemini = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+// ── Translation helper (MyMemory API — free, no key needed) ───────────────
+// Language name → ISO code map for common languages
+const LANG_CODES = {
+  english: 'en', japanese: 'ja', french: 'fr', spanish: 'es',
+  german: 'de', korean: 'ko', chinese: 'zh', vietnamese: 'vi',
+  thai: 'th', italian: 'it', portuguese: 'pt', dutch: 'nl',
+};
 
-// ── Translation helper ─────────────────────────────────────────────────────
+function getLangCode(name) {
+  return LANG_CODES[name.toLowerCase()] || name.toLowerCase().slice(0, 2);
+}
+
 async function translate(text, targetLanguage) {
-  const result = await gemini.generateContent(
-    `Translate the following text to ${targetLanguage}. Return ONLY the translated text with no explanations, labels, or extra punctuation:\n\n${text}`
-  );
-  return result.response.text().trim();
+  const targetCode = getLangCode(targetLanguage);
+  const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=auto|${targetCode}`;
+
+  return new Promise((resolve, reject) => {
+    https.get(url, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        try {
+          const json = JSON.parse(data);
+          resolve(json.responseData.translatedText);
+        } catch (e) {
+          reject(new Error('Translation failed'));
+        }
+      });
+    }).on('error', reject);
+  });
 }
 
 // ── Incoming: auto-translate messages in monitored channels ────────────────
