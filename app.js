@@ -330,8 +330,8 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
       const translated = json[0].map(chunk => chunk[0]).join('');
 
       if (isDM) {
-        // Can't post into a user-to-user DM — show translation for manual copy-paste
-        await reply(`📋 *Translation (→ ${targetLabel}) — copy and send this yourself:*\n${translated}`);
+        // Can't post into a user-to-user DM — show translation in a code block (hover to get copy button)
+        await reply(`📋 *Translation (→ ${targetLabel}) — hover to copy:*\n\`\`\`${translated}\`\`\``);
       } else {
         // Fetch sender's profile to post with their name and avatar
         const profileRes = await client.users.info({ user: command.user_id });
