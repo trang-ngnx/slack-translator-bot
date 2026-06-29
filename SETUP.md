@@ -47,8 +47,8 @@ In your app settings → **Slash Commands** → **Create New Command**:
 
 - Command: `/ed`
 - Request URL: `https://YOUR-RAILWAY-URL.railway.app/slack/events`
-- Description: Translate messages — use `send` or `translate` as subcommands
-- Usage hint: `send [your message] | translate [Slack message link]`
+- Description: Translate messages — use `send` or `trans` as subcommands
+- Usage hint: `send [your message] | trans [Slack message link]`
 
 > All bot actions go through a single `/ed` command. The word after `/ed` determines what it does.
 
@@ -102,9 +102,9 @@ In each channel you want to monitor or use `/translate` in, type:
 |---|---|
 | Read a translation (channels) | Automatic — appears below each message, only you see it |
 | Read a translation (DMs) | Automatic — bot sends you a separate DM with the translation |
-| Translate a specific message | Right-click message → **Copy link** → `/ed translate [paste link]` |
-| Post a message in the channel's language | `/ed send Hello I'll join in 5 minutes` |
-| Post in a specific language | `/ed send Japanese: Hello I'll join in 5 minutes` |
+| Translate a specific message | Right-click message → **Copy link** → `/ed trans [paste link]` |
+| Post a message in the channel's language | `/ed send Hello I'll join in 5 minutes` — auto-detects language from recent messages |
+| Force a specific language | `/ed send Japanese: Hello I'll join in 5 minutes` |
 
 ---
 
@@ -112,6 +112,6 @@ In each channel you want to monitor or use `/translate` in, type:
 
 - **"Your URL didn't respond with the challenge parameter"**: Make sure the URL is `https://` (not `http://`) and ends with `/slack/events`. Also confirm Railway shows the deployment as **Active**.
 - **Bot not translating automatically**: Make sure it's invited to the channel (`/invite @botname`) and the channel ID is in `MONITORED_CHANNEL_IDS`.
-- **`/ed translate` says "could not fetch message"**: The bot isn't in that channel — run `/invite @botname` there first.
+- **`/ed trans` says "could not fetch message"**: The bot isn't in that channel — run `/invite @botname` there first.
 - **"dispatch_failed" error**: Your Railway URL in Slack's event/slash command settings is incorrect.
 - **Translations going to wrong person**: Double-check `MY_SLACK_USER_ID`.

@@ -39,26 +39,38 @@ function getLangCode(name) {
   return LANG_CODES[name.toLowerCase()] || name.toLowerCase().slice(0, 2);
 }
 
-async function translate(text, targetLanguage) {
-  const targetCode = getLangCode(targetLanguage);
-  const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${targetCode}&dt=t&q=${encodeURIComponent(text)}`;
-
+function googleTranslateRaw(text, targetCode) {
+  const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${targetCode}&dt=t&dt=ld&q=${encodeURIComponent(text)}`;
   return new Promise((resolve, reject) => {
     https.get(url, (res) => {
       let data = '';
       res.on('data', chunk => data += chunk);
       res.on('end', () => {
-        try {
-          const json = JSON.parse(data);
-          // Response is nested arrays: [[["translated","original",...],...],...]
-          const translated = json[0].map(chunk => chunk[0]).join('');
-          resolve(translated);
-        } catch (e) {
-          reject(new Error('Translation failed'));
-        }
+        try { resolve(JSON.parse(data)); }
+        catch (e) { reject(new Error('Translation failed')); }
       });
     }).on('error', reject);
   });
+}
+
+async function translate(text, targetLanguage) {
+  const targetCode = getLangCode(targetLanguage);
+  const json = await googleTranslateRaw(text, targetCode);
+  return json[0].map(chunk => chunk[0]).join('');
+}
+
+// Fetch recent non-English messages from a channel and detect their language.
+// Returns an ISO language code (e.g. 'ja', 'vi') or null if undetermined.
+async function detectChannelLanguage(client, channelId) {
+  const result = await client.conversations.history({ channel: channelId, limit: 20 });
+  const messages = (result.messages || []).filter(m => !m.bot_id && !m.subtype && m.text?.trim());
+
+  for (const msg of messages) {
+    const json = await googleTranslateRaw(msg.text, 'en');
+    const detectedLang = json[2]; // e.g. 'ja', 'vi', 'en'
+    if (detectedLang && detectedLang !== 'en') return detectedLang;
+  }
+  return null;
 }
 
 // ── Incoming: auto-translate messages in monitored channels ────────────────
@@ -99,12 +111,12 @@ app.event('message', async ({ event, client, logger }) => {
 // ── /ed — single entry point for all commands ─────────────────────────────
 // Usage:
 //   /ed send Hello everyone, I'll join in 5 minutes
-//   /ed send Japanese: Hola, me uno en 5 minutos   ← override target language
-//   /ed translate https://...slack.com/archives/C.../p...
+//   /ed send Japanese: Hello   ← force a specific target language
+//   /ed trans https://...slack.com/archives/C.../p...
 app.command('/ed', async ({ command, ack, client, logger }) => {
   await ack();
 
-  const USAGE = 'Available commands:\n• `/ed send [your message]` — translate and post to channel\n• `/ed translate [Slack message link]` — translate a message privately';
+  const USAGE = 'Available commands:\n• `/ed send [your message]` — auto-detect channel language, translate and post\n• `/ed trans [Slack message link]` — translate a message privately';
 
   try {
     const [subcommand, ...rest] = (command.text || '').trim().split(/\s+/);
@@ -116,22 +128,38 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
         await client.chat.postEphemeral({
           channel: command.channel_id,
           user: command.user_id,
-          text: '❌ Usage: `/ed send [your message]`\nOptionally prefix with a language: `/ed send Japanese: your message`',
+          text: '❌ Usage: `/ed send [your message]`\nOptionally force a language: `/ed send Japanese: your message`',
         });
         return;
       }
 
-      // Allow inline language override: "/ed send Japanese: こんにちは"
-      let targetLang = CHANNEL_LANGUAGES[command.channel_id] || DEFAULT_OUTGOING_LANG;
       let messageText = args;
+      let targetCode = null;
+      let targetLabel = null;
 
+      // Allow inline language override: "/ed send Japanese: Hello"
       const langOverrideMatch = args.match(/^([A-Za-z\s]{2,20}):\s+([\s\S]+)$/);
       if (langOverrideMatch) {
-        targetLang = langOverrideMatch[1].trim();
+        targetLabel = langOverrideMatch[1].trim();
+        targetCode = getLangCode(targetLabel);
         messageText = langOverrideMatch[2].trim();
       }
 
-      const translated = await translate(messageText, targetLang);
+      // No override — auto-detect from recent channel messages
+      if (!targetCode) {
+        targetCode = await detectChannelLanguage(client, command.channel_id);
+      }
+
+      // Final fallback to env config or English
+      if (!targetCode) {
+        targetLabel = CHANNEL_LANGUAGES[command.channel_id] || DEFAULT_OUTGOING_LANG;
+        targetCode = getLangCode(targetLabel);
+      }
+
+      targetLabel = targetLabel || targetCode;
+
+      const json = await googleTranslateRaw(messageText, targetCode);
+      const translated = json[0].map(chunk => chunk[0]).join('');
 
       await client.chat.postMessage({
         channel: command.channel_id,
@@ -142,16 +170,16 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
       await client.chat.postEphemeral({
         channel: command.channel_id,
         user: command.user_id,
-        text: `✅ *Sent (→ ${targetLang})*\n*Original:* ${messageText}\n*Translated:* ${translated}`,
+        text: `✅ *Sent (→ ${targetLabel})*\n*Original:* ${messageText}\n*Translated:* ${translated}`,
       });
 
-    // ── ed translate ───────────────────────────────────────────────────────
-    } else if (subcommand === 'translate') {
+    // ── ed trans ───────────────────────────────────────────────────────────
+    } else if (subcommand === 'trans') {
       if (!args) {
         await client.chat.postEphemeral({
           channel: command.channel_id,
           user: command.user_id,
-          text: '❌ Usage: `/ed translate [Slack message link]`\nRight-click any message → Copy link, then paste it here.',
+          text: '❌ Usage: `/ed trans [Slack message link]`\nRight-click any message → Copy link, then paste it here.',
         });
         return;
       }
@@ -200,7 +228,7 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
       await client.chat.postEphemeral({
         channel: command.channel_id,
         user: command.user_id,
-        text: `❌ Unknown command.\n${USAGE}`,
+        text: `❌ Unknown command \`${subcommand}\`.\n${USAGE}`,
       });
     }
   } catch (err) {
