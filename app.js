@@ -22,6 +22,18 @@ function saveStore(filename, set) {
   fs.writeFileSync(path.join(__dirname, filename), JSON.stringify([...set]));
 }
 
+function loadMap(filename) {
+  const filePath = path.join(__dirname, filename);
+  try {
+    if (fs.existsSync(filePath)) return new Map(JSON.parse(fs.readFileSync(filePath)));
+  } catch {}
+  return new Map();
+}
+
+function saveMap(filename, map) {
+  fs.writeFileSync(path.join(__dirname, filename), JSON.stringify([...map]));
+}
+
 // Users who receive auto-translations (/ed join / /ed leave)
 const subscribers = loadStore('subscribers.json', process.env.SUBSCRIBER_USER_IDS);
 
@@ -30,6 +42,14 @@ const monitoredChannels = loadStore('channels.json', process.env.MONITORED_CHANN
 
 // DM users being monitored — only works for DMs sent TO THE BOT, not user-to-user DMs
 const monitoredDmUsers = loadStore('dm_users.json', process.env.MONITORED_DM_USER_IDS);
+
+// Per-user incoming language preference: userId → lang code (e.g. 'vi', 'en')
+// Set via /ed lang [language]. Defaults to 'en'.
+const userIncomingLang = loadMap('user_incoming_lang.json');
+
+// Per-user per-channel outgoing language: "userId:channelId" → lang code
+// Set via /ed send [language] (no message). Used for all subsequent /ed send in that channel.
+const userChannelOutgoingLang = loadMap('user_channel_outgoing_lang.json');
 
 // ── Clients ────────────────────────────────────────────────────────────────
 const app = new App({
@@ -123,12 +143,12 @@ app.event('message', async ({ event, client, logger }) => {
 
     if (!isMonitoredChannel && !isMonitoredDM) return;
 
-    const translated = await translate(event.text, 'English');
-
-    // Send translation to every subscribed user
+    // Send translation to every subscribed user in their preferred language
     for (const userId of subscribers) {
+      const targetLang = userIncomingLang.get(userId) || 'en';
+      const translated = await translate(event.text, targetLang);
+
       if (isMonitoredDM) {
-        // Ephemeral not supported in DMs — send a bot DM instead
         await client.chat.postMessage({
           channel: userId,
           text: `🌐 *[Translation from DM]*\n${translated}`,
@@ -155,7 +175,7 @@ app.event('message', async ({ event, client, logger }) => {
 app.command('/ed', async ({ command, ack, client, logger }) => {
   await ack();
 
-  const USAGE = 'Available commands:\n• `/ed join` — subscribe to auto-translations\n• `/ed leave` — unsubscribe\n• `/ed watch` — add this channel to auto-translation monitoring\n• `/ed unwatch` — remove this channel from monitoring\n• `/ed dm-watch @user` — monitor DMs from a user sent to the bot\n• `/ed dm-unwatch @user` — stop monitoring DMs from a user\n• `/ed send [message]` — translate and post to channel\n• `/ed trans [link or text]` — translate privately';
+  const USAGE = 'Available commands:\n• `/ed join` — subscribe to auto-translations\n• `/ed leave` — unsubscribe\n• `/ed lang [language]` — set your preferred incoming translation language (e.g. Vietnamese)\n• `/ed watch` — monitor this channel\n• `/ed unwatch` — stop monitoring this channel\n• `/ed dm-watch @user` — monitor DMs from a user sent to the bot\n• `/ed dm-unwatch @user` — stop monitoring\n• `/ed send [language]` — set default outgoing language for this channel (e.g. Japanese)\n• `/ed send [message]` — translate and post to channel\n• `/ed trans [link or text]` — translate privately';
 
   // Ephemeral messages don't work in DMs — use a bot DM to the user instead
   const isDM = command.channel_id.startsWith('D');
@@ -190,6 +210,18 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
         saveStore('subscribers.json', subscribers);
         await reply('👋 Unsubscribed. You\'ll no longer receive auto-translations.');
       }
+
+    // ── ed lang ────────────────────────────────────────────────────────────
+    } else if (subcommand === 'lang') {
+      if (!args) {
+        const current = userIncomingLang.get(command.user_id) || 'en';
+        await reply(`Your current incoming translation language is *${current}*.\nUsage: \`/ed lang [language]\` — e.g. \`/ed lang Vietnamese\``);
+        return;
+      }
+      const langCode = getLangCode(args);
+      userIncomingLang.set(command.user_id, langCode);
+      saveMap('user_incoming_lang.json', userIncomingLang);
+      await reply(`✅ Done! Auto-translations will now be delivered to you in *${args}* (\`${langCode}\`).`);
 
     // ── ed watch ───────────────────────────────────────────────────────────
     } else if (subcommand === 'watch') {
@@ -255,8 +287,21 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
     // ── ed send ────────────────────────────────────────────────────────────
     } else if (subcommand === 'send') {
       if (!args) {
+        await reply('❌ Usage:\n• `/ed send [language]` — set default outgoing language for this channel (e.g. `/ed send Japanese`)\n• `/ed send [message]` — translate and post');
+        return;
+      }
 
-        await reply('❌ Usage: `/ed send [your message]`\nOptionally force a language: `/ed send Japanese: your message`');
+      // If args is a language name only (no spaces beyond the language name, no sentence-like content)
+      // treat it as setting the default outgoing language for this channel
+      const isLangOnly = Object.keys(LANG_CODES).includes(args.toLowerCase()) ||
+        (args.split(' ').length === 1 && args.length < 20 && /^[A-Za-z]+$/.test(args));
+
+      if (isLangOnly) {
+        const langCode = getLangCode(args);
+        const key = `${command.user_id}:${command.channel_id}`;
+        userChannelOutgoingLang.set(key, langCode);
+        saveMap('user_channel_outgoing_lang.json', userChannelOutgoingLang);
+        await reply(`✅ Default outgoing language for this channel set to *${args}* (\`${langCode}\`). Your next \`/ed send [message]\` will translate to ${args}.`);
         return;
       }
 
@@ -264,7 +309,7 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
       let targetCode = null;
       let targetLabel = null;
 
-      // Allow inline language override: "/ed send Japanese: Hello"
+      // Allow inline one-time language override: "/ed send Japanese: Hello"
       const langOverrideMatch = args.match(/^([A-Za-z\s]{2,20}):\s+([\s\S]+)$/);
       if (langOverrideMatch) {
         targetLabel = langOverrideMatch[1].trim();
@@ -272,12 +317,18 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
         messageText = langOverrideMatch[2].trim();
       }
 
-      // No override — auto-detect from recent channel messages
+      // Use user's saved outgoing language for this channel
+      if (!targetCode) {
+        const key = `${command.user_id}:${command.channel_id}`;
+        targetCode = userChannelOutgoingLang.get(key) || null;
+      }
+
+      // Auto-detect from recent channel messages
       if (!targetCode) {
         targetCode = await detectChannelLanguage(client, command.channel_id);
       }
 
-      // Final fallback to env config or English
+      // Final fallback
       if (!targetCode) {
         targetLabel = CHANNEL_LANGUAGES[command.channel_id] || DEFAULT_OUTGOING_LANG;
         targetCode = getLangCode(targetLabel);
