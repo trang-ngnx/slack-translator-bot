@@ -28,8 +28,7 @@ const app = new App({
   socketMode: process.env.SOCKET_MODE === 'true',
 });
 
-// ── Translation helper (MyMemory API — free, no key needed) ───────────────
-// Language name → ISO code map for common languages
+// ── Translation helper (Google Translate — free, no API key needed) ────────
 const LANG_CODES = {
   english: 'en', japanese: 'ja', french: 'fr', spanish: 'es',
   german: 'de', korean: 'ko', chinese: 'zh', vietnamese: 'vi',
@@ -42,7 +41,7 @@ function getLangCode(name) {
 
 async function translate(text, targetLanguage) {
   const targetCode = getLangCode(targetLanguage);
-  const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=auto|${targetCode}`;
+  const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${targetCode}&dt=t&q=${encodeURIComponent(text)}`;
 
   return new Promise((resolve, reject) => {
     https.get(url, (res) => {
@@ -51,7 +50,9 @@ async function translate(text, targetLanguage) {
       res.on('end', () => {
         try {
           const json = JSON.parse(data);
-          resolve(json.responseData.translatedText);
+          // Response is nested arrays: [[["translated","original",...],...],...]
+          const translated = json[0].map(chunk => chunk[0]).join('');
+          resolve(translated);
         } catch (e) {
           reject(new Error('Translation failed'));
         }
