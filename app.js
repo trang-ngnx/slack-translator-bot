@@ -66,8 +66,10 @@ const LANG_CODES = {
   thai: 'th', italian: 'it', portuguese: 'pt', dutch: 'nl',
 };
 
-function getLangCode(name) {
-  return LANG_CODES[name.toLowerCase()] || name.toLowerCase().slice(0, 2);
+// Accepts both full names ("Japanese") and ISO codes ("ja")
+function getLangCode(input) {
+  const lower = input.toLowerCase().trim();
+  return LANG_CODES[lower] || lower;
 }
 
 // Protect Slack entities from being mangled by translation (ported from joycetran002/slack-translator)
@@ -291,10 +293,9 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
         return;
       }
 
-      // If args is a language name only (no spaces beyond the language name, no sentence-like content)
-      // treat it as setting the default outgoing language for this channel
-      const isLangOnly = Object.keys(LANG_CODES).includes(args.toLowerCase()) ||
-        (args.split(' ').length === 1 && args.length < 20 && /^[A-Za-z]+$/.test(args));
+      // If args is a single word that's a known language name or a 2-5 char ISO code, treat as setting default language
+      const isLangOnly = args.split(' ').length === 1 &&
+        (Object.keys(LANG_CODES).includes(args.toLowerCase()) || /^[a-zA-Z]{2,5}$/.test(args));
 
       if (isLangOnly) {
         const langCode = getLangCode(args);
