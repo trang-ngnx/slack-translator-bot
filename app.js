@@ -126,29 +126,69 @@ app.command('/send', async ({ command, ack, client, logger }) => {
   }
 });
 
-// ── Preview: /translate [text] → shows translation only (doesn't post) ─────
+// ── Preview: /translate [message link] → fetches & translates that message ──
+// Usage: /translate https://yourworkspace.slack.com/archives/C012AB3CD/p1234567890123456
 app.command('/translate', async ({ command, ack, client, logger }) => {
   await ack();
 
   try {
-    if (!command.text?.trim()) {
+    const input = command.text?.trim();
+
+    if (!input) {
       await client.chat.postEphemeral({
         channel: command.channel_id,
         user: command.user_id,
-        text: 'Usage: `/translate [text]` — shows you the English translation without posting',
+        text: 'Usage: `/translate [message link]`\nRight-click any message → Copy link, then paste it here.',
       });
       return;
     }
 
-    const translated = await translate(command.text, 'English');
+    // Parse Slack message link: .../archives/CHANNEL_ID/pTIMESTAMP
+    // The timestamp in the URL has no dot; Slack API needs it as e.g. 1234567890.123456
+    const match = input.match(/\/archives\/(C[A-Z0-9]+)\/p(\d{10})(\d{6})/);
+    if (!match) {
+      await client.chat.postEphemeral({
+        channel: command.channel_id,
+        user: command.user_id,
+        text: '❌ Invalid link. Right-click a Slack message → *Copy link*, then paste it here.',
+      });
+      return;
+    }
+
+    const channelId = match[1];
+    const ts = `${match[2]}.${match[3]}`;
+
+    const result = await client.conversations.history({
+      channel: channelId,
+      latest: ts,
+      inclusive: true,
+      limit: 1,
+    });
+
+    const message = result.messages?.[0];
+    if (!message?.text) {
+      await client.chat.postEphemeral({
+        channel: command.channel_id,
+        user: command.user_id,
+        text: '❌ Could not fetch that message. Make sure the bot is invited to that channel.',
+      });
+      return;
+    }
+
+    const translated = await translate(message.text, 'English');
 
     await client.chat.postEphemeral({
       channel: command.channel_id,
       user: command.user_id,
-      text: `🌐 *Translation preview (only you see this):*\n${translated}`,
+      text: `🌐 *Translation (only you see this):*\n${translated}`,
     });
   } catch (err) {
     logger.error('Error in /translate:', err);
+    await client.chat.postEphemeral({
+      channel: command.channel_id,
+      user: command.user_id,
+      text: `❌ Error: ${err.message}`,
+    });
   }
 });
 
