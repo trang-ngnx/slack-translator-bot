@@ -74,116 +74,115 @@ app.event('message', async ({ event, client, logger }) => {
   }
 });
 
-// ── Outgoing: /send [your message] → translated → posted to channel ────────
+// ── /ed — single entry point for all commands ─────────────────────────────
 // Usage:
-//   /send Hello everyone, I'll join the meeting in 5 minutes
-//   /send Japanese: Hola, me uno en 5 minutos   ← override target language
-app.command('/send', async ({ command, ack, client, logger }) => {
+//   /ed send Hello everyone, I'll join in 5 minutes
+//   /ed send Japanese: Hola, me uno en 5 minutos   ← override target language
+//   /ed translate https://...slack.com/archives/C.../p...
+app.command('/ed', async ({ command, ack, client, logger }) => {
   await ack();
 
-  try {
-    if (!command.text?.trim()) {
-      await client.chat.postEphemeral({
-        channel: command.channel_id,
-        user: command.user_id,
-        text: '❌ Usage: `/send [your message]`\nOptionally prefix with a language: `/send Japanese: your message`',
-      });
-      return;
-    }
-
-    // Allow inline language override: "/send Japanese: こんにちは"
-    let targetLang = CHANNEL_LANGUAGES[command.channel_id] || DEFAULT_OUTGOING_LANG;
-    let messageText = command.text;
-
-    const langOverrideMatch = command.text.match(/^([A-Za-z\s]{2,20}):\s+([\s\S]+)$/);
-    if (langOverrideMatch) {
-      targetLang = langOverrideMatch[1].trim();
-      messageText = langOverrideMatch[2].trim();
-    }
-
-    const translated = await translate(messageText, targetLang);
-
-    // Post translated message to the channel as the bot
-    await client.chat.postMessage({
-      channel: command.channel_id,
-      text: translated,
-      ...(command.thread_ts ? { thread_ts: command.thread_ts } : {}),
-    });
-
-    // Show you a confirmation with both versions (only you see this)
-    await client.chat.postEphemeral({
-      channel: command.channel_id,
-      user: command.user_id,
-      text: `✅ *Sent (→ ${targetLang})*\n*Original:* ${messageText}\n*Translated:* ${translated}`,
-    });
-  } catch (err) {
-    logger.error('Error translating outgoing message:', err);
-    await client.chat.postEphemeral({
-      channel: command.channel_id,
-      user: command.user_id,
-      text: `❌ Translation failed: ${err.message}`,
-    });
-  }
-});
-
-// ── Preview: /translate [message link] → fetches & translates that message ──
-// Usage: /translate https://yourworkspace.slack.com/archives/C012AB3CD/p1234567890123456
-app.command('/translate', async ({ command, ack, client, logger }) => {
-  await ack();
+  const USAGE = 'Available commands:\n• `/ed send [your message]` — translate and post to channel\n• `/ed translate [Slack message link]` — translate a message privately';
 
   try {
-    const input = command.text?.trim();
+    const [subcommand, ...rest] = (command.text || '').trim().split(/\s+/);
+    const args = rest.join(' ').trim();
 
-    if (!input) {
+    // ── ed send ────────────────────────────────────────────────────────────
+    if (subcommand === 'send') {
+      if (!args) {
+        await client.chat.postEphemeral({
+          channel: command.channel_id,
+          user: command.user_id,
+          text: '❌ Usage: `/ed send [your message]`\nOptionally prefix with a language: `/ed send Japanese: your message`',
+        });
+        return;
+      }
+
+      // Allow inline language override: "/ed send Japanese: こんにちは"
+      let targetLang = CHANNEL_LANGUAGES[command.channel_id] || DEFAULT_OUTGOING_LANG;
+      let messageText = args;
+
+      const langOverrideMatch = args.match(/^([A-Za-z\s]{2,20}):\s+([\s\S]+)$/);
+      if (langOverrideMatch) {
+        targetLang = langOverrideMatch[1].trim();
+        messageText = langOverrideMatch[2].trim();
+      }
+
+      const translated = await translate(messageText, targetLang);
+
+      await client.chat.postMessage({
+        channel: command.channel_id,
+        text: translated,
+        ...(command.thread_ts ? { thread_ts: command.thread_ts } : {}),
+      });
+
       await client.chat.postEphemeral({
         channel: command.channel_id,
         user: command.user_id,
-        text: 'Usage: `/translate [message link]`\nRight-click any message → Copy link, then paste it here.',
+        text: `✅ *Sent (→ ${targetLang})*\n*Original:* ${messageText}\n*Translated:* ${translated}`,
       });
-      return;
-    }
 
-    // Parse Slack message link: .../archives/CHANNEL_ID/pTIMESTAMP
-    // The timestamp in the URL has no dot; Slack API needs it as e.g. 1234567890.123456
-    const match = input.match(/\/archives\/(C[A-Z0-9]+)\/p(\d{10})(\d{6})/);
-    if (!match) {
+    // ── ed translate ───────────────────────────────────────────────────────
+    } else if (subcommand === 'translate') {
+      if (!args) {
+        await client.chat.postEphemeral({
+          channel: command.channel_id,
+          user: command.user_id,
+          text: '❌ Usage: `/ed translate [Slack message link]`\nRight-click any message → Copy link, then paste it here.',
+        });
+        return;
+      }
+
+      // Parse Slack message link: .../archives/CHANNEL_ID/pTIMESTAMP
+      const match = args.match(/\/archives\/(C[A-Z0-9]+)\/p(\d{10})(\d{6})/);
+      if (!match) {
+        await client.chat.postEphemeral({
+          channel: command.channel_id,
+          user: command.user_id,
+          text: '❌ Invalid link. Right-click a Slack message → *Copy link*, then paste it here.',
+        });
+        return;
+      }
+
+      const channelId = match[1];
+      const ts = `${match[2]}.${match[3]}`;
+
+      const result = await client.conversations.history({
+        channel: channelId,
+        latest: ts,
+        inclusive: true,
+        limit: 1,
+      });
+
+      const message = result.messages?.[0];
+      if (!message?.text) {
+        await client.chat.postEphemeral({
+          channel: command.channel_id,
+          user: command.user_id,
+          text: '❌ Could not fetch that message. Make sure the bot is invited to that channel.',
+        });
+        return;
+      }
+
+      const translated = await translate(message.text, 'English');
+
       await client.chat.postEphemeral({
         channel: command.channel_id,
         user: command.user_id,
-        text: '❌ Invalid link. Right-click a Slack message → *Copy link*, then paste it here.',
+        text: `🌐 *Translation (only you see this):*\n${translated}`,
       });
-      return;
-    }
 
-    const channelId = match[1];
-    const ts = `${match[2]}.${match[3]}`;
-
-    const result = await client.conversations.history({
-      channel: channelId,
-      latest: ts,
-      inclusive: true,
-      limit: 1,
-    });
-
-    const message = result.messages?.[0];
-    if (!message?.text) {
+    // ── unknown subcommand ─────────────────────────────────────────────────
+    } else {
       await client.chat.postEphemeral({
         channel: command.channel_id,
         user: command.user_id,
-        text: '❌ Could not fetch that message. Make sure the bot is invited to that channel.',
+        text: `❌ Unknown command.\n${USAGE}`,
       });
-      return;
     }
-
-    const translated = await translate(message.text, 'English');
-
-    await client.chat.postEphemeral({
-      channel: command.channel_id,
-      user: command.user_id,
-      text: `🌐 *Translation (only you see this):*\n${translated}`,
-    });
   } catch (err) {
-    logger.error('Error in /translate:', err);
+    logger.error('Error in /ed:', err);
     await client.chat.postEphemeral({
       channel: command.channel_id,
       user: command.user_id,

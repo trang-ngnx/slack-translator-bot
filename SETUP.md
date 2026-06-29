@@ -41,21 +41,16 @@ Add these scopes:
 
 ---
 
-## Step 3 — Add Slash Commands
+## Step 3 — Add Slash Command
 
 In your app settings → **Slash Commands** → **Create New Command**:
 
-**Command 1:**
-- Command: `/send`
+- Command: `/ed`
 - Request URL: `https://YOUR-RAILWAY-URL.railway.app/slack/events`
-- Description: Translate your message and post it to the channel
-- Usage hint: `[your message in any language]`
+- Description: Translate messages — use `send` or `translate` as subcommands
+- Usage hint: `send [your message] | translate [Slack message link]`
 
-**Command 2:**
-- Command: `/translate`
-- Request URL: `https://YOUR-RAILWAY-URL.railway.app/slack/events`
-- Description: Translate a message by link (only you see it, nothing posted)
-- Usage hint: `[Slack message link]`
+> All bot actions go through a single `/ed` command. The word after `/ed` determines what it does.
 
 ---
 
@@ -107,9 +102,9 @@ In each channel you want to monitor or use `/translate` in, type:
 |---|---|
 | Read a translation (channels) | Automatic — appears below each message, only you see it |
 | Read a translation (DMs) | Automatic — bot sends you a separate DM with the translation |
-| Translate a specific message | Right-click message → **Copy link** → `/translate [paste link]` |
-| Post a message in the channel's language | `/send Hello I'll join in 5 minutes` |
-| Post in a specific language | `/send Japanese: Hello I'll join in 5 minutes` |
+| Translate a specific message | Right-click message → **Copy link** → `/ed translate [paste link]` |
+| Post a message in the channel's language | `/ed send Hello I'll join in 5 minutes` |
+| Post in a specific language | `/ed send Japanese: Hello I'll join in 5 minutes` |
 
 ---
 
@@ -117,6 +112,6 @@ In each channel you want to monitor or use `/translate` in, type:
 
 - **"Your URL didn't respond with the challenge parameter"**: Make sure the URL is `https://` (not `http://`) and ends with `/slack/events`. Also confirm Railway shows the deployment as **Active**.
 - **Bot not translating automatically**: Make sure it's invited to the channel (`/invite @botname`) and the channel ID is in `MONITORED_CHANNEL_IDS`.
-- **`/translate` says "could not fetch message"**: The bot isn't in that channel — run `/invite @botname` there first.
+- **`/ed translate` says "could not fetch message"**: The bot isn't in that channel — run `/invite @botname` there first.
 - **"dispatch_failed" error**: Your Railway URL in Slack's event/slash command settings is incorrect.
 - **Translations going to wrong person**: Double-check `MY_SLACK_USER_ID`.
