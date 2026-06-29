@@ -183,7 +183,7 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
       }
 
       // Parse Slack message link: .../archives/CHANNEL_ID/pTIMESTAMP
-      const match = args.match(/\/archives\/(C[A-Z0-9]+)\/p(\d{10})(\d{6})/);
+      const match = args.match(/\/archives\/([A-Z0-9]+)\/p(\d{10})(\d{6})/);
       if (!match) {
         await reply('❌ Invalid link. Right-click a Slack message → *Copy link*, then paste it here.');
         return;
