@@ -9,8 +9,10 @@ const CHANNEL_LANGUAGES = JSON.parse(process.env.CHANNEL_LANGUAGES || '{}');
 const DEFAULT_OUTGOING_LANG = process.env.OUTGOING_LANGUAGE || 'English';
 
 // ── Persistent stores ──────────────────────────────────────────────────────
+const DATA_DIR = process.env.DATA_DIR || __dirname;
+
 function loadStore(filename, envSeed) {
-  const filePath = path.join(__dirname, filename);
+  const filePath = path.join(DATA_DIR, filename);
   try {
     if (fs.existsSync(filePath)) return new Set(JSON.parse(fs.readFileSync(filePath)));
   } catch {}
@@ -19,11 +21,11 @@ function loadStore(filename, envSeed) {
 }
 
 function saveStore(filename, set) {
-  fs.writeFileSync(path.join(__dirname, filename), JSON.stringify([...set]));
+  fs.writeFileSync(path.join(DATA_DIR, filename), JSON.stringify([...set]));
 }
 
 function loadMap(filename) {
-  const filePath = path.join(__dirname, filename);
+  const filePath = path.join(DATA_DIR, filename);
   try {
     if (fs.existsSync(filePath)) return new Map(JSON.parse(fs.readFileSync(filePath)));
   } catch {}
@@ -31,7 +33,7 @@ function loadMap(filename) {
 }
 
 function saveMap(filename, map) {
-  fs.writeFileSync(path.join(__dirname, filename), JSON.stringify([...map]));
+  fs.writeFileSync(path.join(DATA_DIR, filename), JSON.stringify([...map]));
 }
 
 // Users who receive auto-translations (/ed join / /ed leave)
