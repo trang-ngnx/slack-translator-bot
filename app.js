@@ -136,8 +136,8 @@ async function detectChannelLanguage(client, channelId) {
 // ── Incoming: auto-translate messages in monitored channels ────────────────
 app.event('message', async ({ event, client, logger }) => {
   try {
-    // Skip bot messages, edits, deletes, and messages from subscribers themselves
-    if (event.subtype || event.bot_id || subscribers.has(event.user)) return;
+    // Skip bot messages, edits, deletes
+    if (event.subtype || event.bot_id) return;
     if (!event.text?.trim()) return;
 
     const isMonitoredChannel = monitoredChannels.has(event.channel);
@@ -145,8 +145,9 @@ app.event('message', async ({ event, client, logger }) => {
 
     if (!isMonitoredChannel && !isMonitoredDM) return;
 
-    // Send translation to every subscribed user in their preferred language
+    // Send translation to every subscribed user except the sender
     for (const userId of subscribers) {
+      if (userId === event.user) continue;
       const targetLang = userIncomingLang.get(userId) || 'en';
       const translated = await translate(event.text, targetLang);
 
