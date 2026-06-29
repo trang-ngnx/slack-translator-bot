@@ -182,7 +182,7 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
         await reply('✅ You\'re already subscribed to auto-translations.');
       } else {
         subscribers.add(command.user_id);
-        saveSubscribers();
+        saveStore('subscribers.json', subscribers);
         await reply('✅ Subscribed! You\'ll now receive translations for messages in monitored channels.');
       }
 
@@ -192,7 +192,7 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
         await reply('You\'re not currently subscribed.');
       } else {
         subscribers.delete(command.user_id);
-        saveSubscribers();
+        saveStore('subscribers.json', subscribers);
         await reply('👋 Unsubscribed. You\'ll no longer receive auto-translations.');
       }
 
