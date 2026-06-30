@@ -439,6 +439,7 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
           text: translated,
           username: displayName,
           icon_url: avatarUrl,
+          blocks: [{ type: 'section', text: { type: 'mrkdwn', text: translated } }],
           ...(command.thread_ts ? { thread_ts: command.thread_ts } : {}),
         });
 
@@ -587,6 +588,7 @@ app.view('translate_reply_modal', async ({ view, ack, client, body, logger }) =>
       text: translated,
       username: displayName,
       icon_url: avatarUrl,
+      blocks: [{ type: 'section', text: { type: 'mrkdwn', text: translated } }],
     });
   } catch (err) {
     logger.error('Error in translate_reply_modal submit:', err);
