@@ -244,44 +244,43 @@ async function detectChannelLanguage(client, channelId) {
 }
 
 // ── Rich text helpers ──────────────────────────────────────────────────────
-function richTextSectionToMrkdwn(elements) {
-  let out = '';
-  for (const el of elements || []) {
-    if (el.type === 'text') {
-      let t = el.text;
-      if (el.style?.code)   t = `\`${t}\``;
-      else {
-        if (el.style?.bold)   t = `*${t}*`;
-        if (el.style?.italic) t = `_${t}_`;
-        if (el.style?.strike) t = `~${t}~`;
-      }
-      out += t;
-    } else if (el.type === 'link')    { out += `<${el.url}|${el.text || el.url}>`; }
-    else if (el.type === 'user')      { out += `<@${el.user_id}>`; }
-    else if (el.type === 'channel')   { out += `<#${el.channel_id}>`; }
-    else if (el.type === 'emoji')     { out += `:${el.name}:`; }
-  }
-  return out;
-}
 
-function richTextToMrkdwn(richText) {
-  if (!richText?.elements) return '';
-  const lines = [];
-  for (const block of richText.elements) {
-    if (block.type === 'rich_text_section') {
-      lines.push(richTextSectionToMrkdwn(block.elements));
-    } else if (block.type === 'rich_text_preformatted') {
-      const t = block.elements?.map(e => e.text || '').join('');
-      lines.push('```' + t + '```');
-    } else if (block.type === 'rich_text_quote') {
-      lines.push('>' + richTextSectionToMrkdwn(block.elements));
-    } else if (block.type === 'rich_text_list') {
-      for (const item of block.elements || []) {
-        lines.push('• ' + richTextSectionToMrkdwn(item.elements));
+// Translate a rich_text block in-place: only text elements are translated,
+// all style/structure (bold, italic, strike, links, emoji) is preserved.
+async function translateRichText(richText, targetLang) {
+  const targetCode = getLangCode(targetLang);
+  const clone = JSON.parse(JSON.stringify(richText));
+
+  for (const block of clone.elements || []) {
+    const items = block.type === 'rich_text_list'
+      ? (block.elements || []).flatMap(li => li.elements || [])
+      : (block.elements || []);
+
+    for (const el of items) {
+      if (el.type === 'text' && el.text?.trim() && !el.style?.code) {
+        const json = await googleTranslateRaw(el.text, targetCode);
+        el.text = json[0].map(c => c[0]).join('');
       }
     }
   }
-  return lines.join('\n');
+
+  return clone;
+}
+
+// Plain-text fallback for chat.postMessage `text` field (used alongside blocks)
+function richTextToPlain(richText) {
+  if (!richText?.elements) return '';
+  const parts = [];
+  for (const block of richText.elements || []) {
+    const items = block.type === 'rich_text_list'
+      ? (block.elements || []).flatMap(li => li.elements || [])
+      : (block.elements || []);
+    for (const el of items) {
+      if (el.type === 'text') parts.push(el.text || '');
+      else if (el.type === 'emoji') parts.push(`:${el.name}:`);
+    }
+  }
+  return parts.join('');
 }
 
 // ── Shared modal definition ────────────────────────────────────────────────
@@ -688,15 +687,16 @@ app.view('translate_reply_modal', async ({ view, ack, client, body, logger }) =>
     const { channelId, threadTs } = JSON.parse(view.private_metadata);
     const langInput = view.state.values.lang_block.lang_input.value?.trim();
     const richTextValue = view.state.values.message_block.message_input.rich_text_value;
-    const messageText = richTextToMrkdwn(richTextValue);
 
-    if (!messageText.trim()) return;
+    if (!richTextValue) return;
 
     let targetCode = langInput ? getLangCode(langInput) : null;
     if (!targetCode) targetCode = await detectChannelLanguage(client, channelId);
     if (!targetCode) targetCode = getLangCode(DEFAULT_OUTGOING_LANG);
 
-    const translated = await translate(messageText, targetCode);
+    // Translate each text element individually — preserves bold/italic/strike structure
+    const translatedRichText = await translateRichText(richTextValue, targetCode);
+    const plainFallback = richTextToPlain(translatedRichText);
 
     const profileRes = await client.users.info({ user: body.user.id });
     const profile = profileRes.user?.profile;
@@ -706,10 +706,10 @@ app.view('translate_reply_modal', async ({ view, ack, client, body, logger }) =>
     await postAsUser(client, body.user.id, {
       channel: channelId,
       thread_ts: threadTs,
-      text: translated,
+      text: plainFallback,
       username: displayName,
       icon_url: avatarUrl,
-      blocks: [{ type: 'section', text: { type: 'mrkdwn', text: translated } }],
+      blocks: [{ type: 'rich_text', elements: translatedRichText.elements }],
     });
   } catch (err) {
     logger.error('Error in translate_reply_modal submit:', err);
