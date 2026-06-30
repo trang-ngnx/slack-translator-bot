@@ -19,7 +19,6 @@ const KEYS = {
   userIncomingLang:       'user_incoming_lang',
   userChannelOutgoingLang:'user_channel_outgoing_lang',
   userTokens:             'user_tokens',   // hash: userId → user OAuth token
-  oauthStates:            'oauth_states',  // hash: state → userId (expires quickly)
 };
 
 async function setAdd(key, value)    { await redis.sadd(key, value); }
@@ -89,9 +88,15 @@ receiver.router.get('/oauth/callback', async (req, res) => {
     return res.send('<p>Authorization failed or was cancelled. You can close this tab.</p>');
   }
 
-  const userId = await hashGet(KEYS.oauthStates, state);
-  if (!userId) {
-    return res.send('<p>This link has expired. Please run <b>/ed login</b> again in Slack.</p>');
+  // Decode userId from state (base64url encoded as "userId:nonce")
+  let userId;
+  try {
+    const padded = state.replace(/-/g, '+').replace(/_/g, '/') + '=='.slice((state.length * 3) % 4);
+    const decoded = Buffer.from(padded, 'base64').toString();
+    userId = decoded.split(':')[0];
+    if (!userId) throw new Error('empty');
+  } catch {
+    return res.send('<p>Invalid state parameter. Please run <b>/ed login</b> again in Slack.</p>');
   }
 
   try {
@@ -102,7 +107,6 @@ receiver.router.get('/oauth/callback', async (req, res) => {
     if (!userToken) throw new Error('No user token in response');
 
     await hashSet(KEYS.userTokens, userId, userToken);
-    await hashDel(KEYS.oauthStates, state);
 
     // Notify user in Slack
     await app.client.chat.postMessage({
@@ -412,10 +416,9 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
         await reply('✅ You\'re already authorized. Your messages are sent directly from you.\nUse `/ed logout` to remove authorization.');
         return;
       }
-      const state = Math.random().toString(36).slice(2) + Date.now().toString(36);
-      await hashSet(KEYS.oauthStates, state, command.user_id);
-      // Expire state after 10 minutes
-      await redis.expire(KEYS.oauthStates, 600);
+      // Encode userId in state directly — avoids Redis timing issues
+      const nonce = Math.random().toString(36).slice(2);
+      const state = Buffer.from(`${command.user_id}:${nonce}`).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
 
       const redirectUri = encodeURIComponent(process.env.SLACK_OAUTH_REDIRECT_URI);
       const authUrl = `https://slack.com/oauth/v2/authorize?client_id=${process.env.SLACK_CLIENT_ID}&user_scope=chat:write&redirect_uri=${redirectUri}&state=${state}`;
