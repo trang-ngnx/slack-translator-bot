@@ -273,21 +273,50 @@ async function detectChannelLanguage(client, channelId) {
 
 // Translate a rich_text block in-place: only text elements are translated,
 // all style/structure (bold, italic, strike, links, emoji) is preserved.
+// Expand any :emoji_name: shortcodes in a string into a mix of text/emoji elements,
+// preserving the style of the original text element.
+function expandEmojiShortcodes(text, style) {
+  const EMOJI_RE = /:[a-z0-9_+\-']+:/g;
+  const result = [];
+  let last = 0;
+  let m;
+  while ((m = EMOJI_RE.exec(text)) !== null) {
+    if (m.index > last) {
+      const el = { type: 'text', text: text.slice(last, m.index) };
+      if (style) el.style = style;
+      result.push(el);
+    }
+    result.push({ type: 'emoji', name: m[0].slice(1, -1) });
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) {
+    const el = { type: 'text', text: text.slice(last) };
+    if (style) el.style = style;
+    result.push(el);
+  }
+  return result.length ? result : [{ type: 'text', text, ...(style ? { style } : {}) }];
+}
+
 async function translateRichText(richText, targetLang) {
   const targetCode = getLangCode(targetLang);
   const clone = JSON.parse(JSON.stringify(richText));
 
   for (const block of clone.elements || []) {
-    const items = block.type === 'rich_text_list'
-      ? (block.elements || []).flatMap(li => li.elements || [])
-      : (block.elements || []);
-
-    for (const el of items) {
-      if (el.type === 'text' && el.text?.trim() && !el.style?.code) {
-        const { masked, stash } = protect(el.text);
-        const json = await googleTranslateRaw(masked, targetCode);
-        el.text = restore(json[0].map(c => c[0]).join(''), stash);
+    const lists = block.type === 'rich_text_list' ? (block.elements || []) : [block];
+    for (const section of lists) {
+      const newElements = [];
+      for (const el of (section.elements || [])) {
+        if (el.type === 'text' && el.text?.trim() && !el.style?.code) {
+          const { masked, stash } = protect(el.text);
+          const json = await googleTranslateRaw(masked, targetCode);
+          const restored = restore(json[0].map(c => c[0]).join(''), stash);
+          // Expand :emoji: shortcodes into proper emoji elements so they render in Slack
+          newElements.push(...expandEmojiShortcodes(restored, el.style));
+        } else {
+          newElements.push(el);
+        }
       }
+      section.elements = newElements;
     }
   }
 
@@ -298,20 +327,17 @@ async function translateRichText(richText, targetLang) {
 // element-by-element and posted as a native rich_text block (avoids marker rendering issues)
 function mrkdwnToRichText(text) {
   const elements = [];
-  // Match Slack links <url|label>, Slack entities <@U...>/<#C...>, formatting markers, and emoji shortcodes
-  const TOKEN_RE = /<(https?:\/\/[^|>]+)\|([^>]+)>|<(https?:\/\/[^>]+)>|(\*[^*\n]+\*|_[^_\n]+_|~[^~\n]+~|`[^`\n]+`)/g;
+  // Match Slack links, formatting markers, and emoji shortcodes
+  const TOKEN_RE = /<(https?:\/\/[^|>]+)\|([^>]+)>|<(https?:\/\/[^>]+)>|(\*[^*\n]+\*|_[^_\n]+_|~[^~\n]+~|`[^`\n]+`)|(:([a-z0-9_+\-']+):)/g;
   let last = 0;
   let m;
   while ((m = TOKEN_RE.exec(text)) !== null) {
     if (m.index > last) elements.push({ type: 'text', text: text.slice(last, m.index) });
     if (m[1]) {
-      // <url|label> → link element with display label
       elements.push({ type: 'link', url: m[1], text: m[2] });
     } else if (m[3]) {
-      // <url> → bare link
       elements.push({ type: 'link', url: m[3] });
-    } else {
-      // formatting markers *bold* _italic_ ~strike~ `code`
+    } else if (m[4]) {
       const marker = m[4][0];
       const inner = m[4].slice(1, -1);
       const style = marker === '*' ? { bold: true }
@@ -319,6 +345,9 @@ function mrkdwnToRichText(text) {
                   : marker === '~' ? { strike: true }
                   : { code: true };
       elements.push({ type: 'text', text: inner, style });
+    } else {
+      // :emoji_name: → native emoji element
+      elements.push({ type: 'emoji', name: m[6] });
     }
     last = m.index + m[0].length;
   }
