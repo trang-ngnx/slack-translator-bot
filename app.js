@@ -28,22 +28,40 @@ async function viewersRemove(userId, channelId, viewerId){ await redis.srem(view
 async function viewersList(userId, channelId)            { return redis.smembers(viewersKey(userId, channelId)); }
 async function viewersClear(userId, channelId)           { await redis.del(viewersKey(userId, channelId)); }
 
+// Send a DM with a Dismiss button (mobile-visible companion to ephemeral messages)
+async function dmWithDismiss(client, userId, text, blocks = null) {
+  const msgBlocks = blocks || [{ type: 'section', text: { type: 'mrkdwn', text } }];
+  await client.chat.postMessage({
+    channel: userId,
+    text,
+    blocks: [
+      ...msgBlocks,
+      {
+        type: 'actions',
+        elements: [{ type: 'button', text: { type: 'plain_text', text: 'Dismiss' }, action_id: 'dismiss_dm' }],
+      },
+    ],
+  });
+}
+
 // Send ephemeral notifications to all viewers of a translation in a channel
 async function notifyViewers(client, { senderId, channelId, threadTs, senderName, originalText, translatedBlocks, targetLabel }) {
   const ids = await viewersList(senderId, channelId);
   if (!ids.length) return;
   for (const viewerId of ids) {
+    const viewerBlocks = [
+      { type: 'section', text: { type: 'mrkdwn', text: `👁 *${senderName}* sent a translated message (→ ${targetLabel}):\n*Original:* ${originalText}` } },
+      { type: 'divider' },
+      { type: 'rich_text', elements: translatedBlocks },
+    ];
     await client.chat.postEphemeral({
       channel: channelId,
       user: viewerId,
       ...(threadTs ? { thread_ts: threadTs } : {}),
       text: `👁 *[${senderName} → ${targetLabel}]* ${originalText}`,
-      blocks: [
-        { type: 'section', text: { type: 'mrkdwn', text: `👁 *${senderName}* sent a translated message (→ ${targetLabel}):\n*Original:* ${originalText}` } },
-        { type: 'divider' },
-        { type: 'rich_text', elements: translatedBlocks },
-      ],
+      blocks: viewerBlocks,
     });
+    await dmWithDismiss(client, viewerId, `👁 *[${senderName} → ${targetLabel}]* ${originalText}`, viewerBlocks);
   }
 }
 
@@ -469,19 +487,18 @@ app.event('message', async ({ event, client, logger }) => {
             value: ctx,
           },
         ];
+        const translationText = `🌐 *[${senderName}]* ${translated}`;
         await client.chat.postEphemeral({
           channel: event.channel,
           user: userId,
           ...(isThreadReply ? { thread_ts: threadTs } : {}),
-          text: `🌐 *[${senderName}]* ${translated}`,
+          text: translationText,
           blocks: [
-            {
-              type: 'section',
-              text: { type: 'mrkdwn', text: `🌐 *[${senderName}]* ${translated}` },
-            },
+            { type: 'section', text: { type: 'mrkdwn', text: translationText } },
             { type: 'actions', elements: actionButtons },
           ],
         });
+        await dmWithDismiss(client, userId, translationText);
       }
     }
   } catch (err) {
@@ -501,6 +518,7 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
       await client.chat.postMessage({ channel: command.user_id, text });
     } else {
       await client.chat.postEphemeral({ channel: command.channel_id, user: command.user_id, text });
+      await dmWithDismiss(client, command.user_id, text);
     }
   }
 
@@ -672,14 +690,16 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
         // Ephemeral in the thread of the sent message — only visible to sender
         const sentTs = sent?.ts || sent?.message?.ts;
         logger.info(`[ed send] sent.ts=${sentTs}`, sent);
+        const sendConfirmText = `✅ *Sent (→ ${targetLabel})* — only you see this\n*Original:* ${messageText}`;
         await client.chat.postEphemeral({
           channel: command.channel_id,
           user: command.user_id,
           thread_ts: sentTs,
           username: displayName,
           icon_url: avatarUrl,
-          text: `✅ *Sent (→ ${targetLabel})* — only you see this\n*Original:* ${messageText}`,
+          text: sendConfirmText,
         });
+        await dmWithDismiss(client, command.user_id, sendConfirmText);
 
         // Notify viewers — post in the thread of the sent message
         await notifyViewers(client, {
@@ -793,6 +813,7 @@ app.action('thread_translate_msg', async ({ body, ack, client, logger }) => {
     const message = result.messages?.find(m => m.ts === messageTs);
     if (!message?.text) {
       await client.chat.postEphemeral({ channel: channelId, user: userId, thread_ts: threadTs, text: '❌ Could not fetch the message.' });
+      await dmWithDismiss(client, userId, '❌ Could not fetch the message.');
       return;
     }
 
@@ -807,12 +828,14 @@ app.action('thread_translate_msg', async ({ body, ack, client, logger }) => {
       if (name) senderLabel = ` — *${name}*`;
     }
 
+    const threadTransText = `🌐 *Translation${senderLabel}* (only you see this):\n${translated}`;
     await client.chat.postEphemeral({
       channel: channelId,
       user: userId,
       thread_ts: threadTs,
-      text: `🌐 *Translation${senderLabel}* (only you see this):\n${translated}`,
+      text: threadTransText,
     });
+    await dmWithDismiss(client, userId, threadTransText);
   } catch (err) {
     logger.error('Error in thread_translate_msg:', err);
   }
@@ -840,18 +863,21 @@ app.shortcut('translate_message', async ({ shortcut, ack, client, logger }) => {
 
     if (!messageText?.trim()) {
       await client.chat.postEphemeral({ channel: channelId, user: userId, text: '❌ This message has no text to translate.' });
+      await dmWithDismiss(client, userId, '❌ This message has no text to translate.');
       return;
     }
 
     const targetLang = await hashGet(KEYS.userIncomingLang, userId) || 'en';
     const translated = await translate(messageText, targetLang);
 
+    const shortcutTransText = `🌐 *Translation (only you see this):*\n${translated}`;
     await client.chat.postEphemeral({
       channel: channelId,
       user: userId,
       thread_ts: threadTs,
-      text: `🌐 *Translation (only you see this):*\n${translated}`,
+      text: shortcutTransText,
     });
+    await dmWithDismiss(client, userId, shortcutTransText);
   } catch (err) {
     logger.error('Error in translate_message shortcut:', err);
   }
@@ -905,14 +931,16 @@ app.view('translate_reply_modal', async ({ view, ack, client, body, logger }) =>
     const originalPlain = richTextToPlain(richTextValue);
     const sentTs = sent?.ts || sent?.message?.ts;
     logger.info(`[modal send] sent.ts=${sentTs}`, sent);
+    const modalConfirmText = `✅ *Sent (→ ${targetCode})* — only you see this\n*Original:* ${originalPlain}`;
     await client.chat.postEphemeral({
       channel: channelId,
       user: body.user.id,
       thread_ts: sentTs || threadTs,
       username: displayName,
       icon_url: avatarUrl,
-      text: `✅ *Sent (→ ${targetCode})* — only you see this\n*Original:* ${originalPlain}`,
+      text: modalConfirmText,
     });
+    await dmWithDismiss(client, body.user.id, modalConfirmText);
 
     // Notify viewers — post in the thread of the sent message
     await notifyViewers(client, {
@@ -927,6 +955,17 @@ app.view('translate_reply_modal', async ({ view, ack, client, body, logger }) =>
   } catch (err) {
     logger.error('Error in translate_reply_modal submit:', err);
   }
+});
+
+// ── Dismiss button: delete the DM companion message ───────────────────────
+app.action('dismiss_dm', async ({ body, ack, client }) => {
+  await ack();
+  try {
+    await client.chat.delete({
+      channel: body.container.channel_id,
+      ts: body.container.message_ts,
+    });
+  } catch (_) {}
 });
 
 // ── Start ──────────────────────────────────────────────────────────────────
