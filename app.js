@@ -371,25 +371,20 @@ app.event('message', async ({ event, client, logger }) => {
           text: `🌐 *[${senderName} — DM Translation]*\n${translated}`,
         });
       } else if (isThreadReply) {
+        const translated = await translate(event.text, targetLang);
         await client.chat.postEphemeral({
           channel: event.channel,
           user: userId,
           thread_ts: event.thread_ts,
-          text: `💬 New message from ${senderName} — what would you like to do?`,
+          text: `🌐 *[${senderName}]* ${translated}`,
           blocks: [
             {
               type: 'section',
-              text: { type: 'mrkdwn', text: `💬 *New message from ${senderName}* — only you see this.` },
+              text: { type: 'mrkdwn', text: `🌐 *[${senderName}]* ${translated}` },
             },
             {
               type: 'actions',
               elements: [
-                {
-                  type: 'button',
-                  text: { type: 'plain_text', text: '🌐 Translate this message', emoji: true },
-                  action_id: 'thread_translate_msg',
-                  value: ctx,
-                },
                 {
                   type: 'button',
                   text: { type: 'plain_text', text: '✏️ Reply with translation', emoji: true },
