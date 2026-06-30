@@ -711,20 +711,21 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
     } else if (subcommand === 'newbie') {
       await reply(
         `👋 *Welcome to the ED Translator Bot!*\n\nHere's how to get started:\n\n` +
-        `*1. Subscribe to translations*\n` +
+        `*1. Authorize yourself (required)*\n` +
+        `Run \`/ed login\` and follow the link in your DMs. This lets your messages appear as *you* — not as the bot app. This is important when communicating with clients and partners.\n\n` +
+        `*2. Subscribe to translations*\n` +
         `Run \`/ed join\` — you'll start receiving private translations for new messages in monitored channels.\n\n` +
-        `*2. Set your language*\n` +
+        `*3. Set your language*\n` +
         `Run \`/ed lang Vietnamese\` (or any language) to receive translations in your preferred language.\n\n` +
-        `*3. Monitor a channel*\n` +
-        `In the channel you want to watch, run \`/ed watch\`. Now every new message there will be translated privately for subscribers.\n\n` +
-        `*4. Send translated messages*\n` +
+        `*4. Monitor a channel*\n` +
+        `In the channel you want to watch, run \`/ed watch\`. Every new message there will be privately translated for subscribers.\n\n` +
+        `*5. Send translated messages*\n` +
         `Use \`/ed send [your message]\` to translate and post your message in this channel.\n` +
         `Or right-click any message → *More message shortcuts* → *Translate & Reply* to reply in thread.\n\n` +
-        `*5. Post as yourself (recommended)*\n` +
-        `Run \`/ed login\` to authorize the bot to post as you — your messages won't show an "App" badge.\n\n` +
         `*6. Let teammates see your translations*\n` +
         `Run \`/ed viewers add @alice @bob\` so they privately see what you send (translated) in this channel.\n\n` +
-        `Run \`/ed\` anytime to see all available commands.`
+        `Run \`/ed\` anytime to see all available commands.\n\n` +
+        `📖 *Full setup guide:* <https://ownego.slack.com/docs/T024TKZ7R/F0BDWRBA8LR|View the Slack canvas>`
       );
 
     } else if (!subcommand) {
