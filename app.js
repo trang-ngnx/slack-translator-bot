@@ -457,12 +457,6 @@ app.event('message', async ({ event, client, logger }) => {
         const actionButtons = [
           {
             type: 'button',
-            text: { type: 'plain_text', text: '🌐 Translate this message', emoji: true },
-            action_id: 'thread_translate_msg',
-            value: ctx,
-          },
-          {
-            type: 'button',
             text: { type: 'plain_text', text: '✏️ Reply with translation', emoji: true },
             style: 'primary',
             action_id: 'thread_open_reply_modal',
