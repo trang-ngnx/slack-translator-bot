@@ -616,10 +616,13 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
           ...(command.thread_ts ? { thread_ts: command.thread_ts } : {}),
         });
 
-        // Ephemeral confirmation — only visible to sender, appears right below the sent message
+        // Ephemeral in the thread of the sent message — only visible to sender
+        const sentTs = sent?.ts || sent?.message?.ts;
+        logger.info(`[ed send] sent.ts=${sentTs}`, sent);
         await client.chat.postEphemeral({
           channel: command.channel_id,
           user: command.user_id,
+          thread_ts: sentTs,
           username: displayName,
           icon_url: avatarUrl,
           text: `✅ *Sent (→ ${targetLabel})* — only you see this\n*Original:* ${messageText}`,
@@ -822,12 +825,14 @@ app.view('translate_reply_modal', async ({ view, ack, client, body, logger }) =>
       blocks: [{ type: 'rich_text', elements: translatedRichText.elements }],
     });
 
-    // Ephemeral confirmation — only visible to sender, appears right below the sent message
+    // Ephemeral in the thread of the sent message — only visible to sender
     const originalPlain = richTextToPlain(richTextValue);
+    const sentTs = sent?.ts || sent?.message?.ts;
+    logger.info(`[modal send] sent.ts=${sentTs}`, sent);
     await client.chat.postEphemeral({
       channel: channelId,
       user: body.user.id,
-      thread_ts: threadTs,
+      thread_ts: sentTs || threadTs,
       username: displayName,
       icon_url: avatarUrl,
       text: `✅ *Sent (→ ${targetCode})* — only you see this\n*Original:* ${originalPlain}`,
