@@ -590,12 +590,12 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
           ...(command.thread_ts ? { thread_ts: command.thread_ts } : {}),
         });
 
-        // Post confirmation as a thread reply to the sent message (only visible to sender)
-        const sentTs = sent?.ts;
+        // Confirmation appears right below the sent message, shown as the user
         await client.chat.postEphemeral({
           channel: command.channel_id,
           user: command.user_id,
-          thread_ts: sentTs,
+          username: displayName,
+          icon_url: avatarUrl,
           text: `✅ *Sent (→ ${targetLabel})*\n*Original:* ${messageText}`,
         });
       }
@@ -752,16 +752,16 @@ app.view('translate_reply_modal', async ({ view, ack, client, body, logger }) =>
       blocks: [{ type: 'rich_text', elements: translatedRichText.elements }],
     });
 
-    // Post confirmation as a thread reply to the sent message (only visible to sender)
+    // Confirmation appears right below the sent message, shown as the user
     const originalPlain = richTextToPlain(richTextValue);
-    if (sent?.ts) {
-      await client.chat.postEphemeral({
-        channel: channelId,
-        user: body.user.id,
-        thread_ts: sent.ts,
-        text: `✅ *Sent (→ ${targetCode})*\n*Original:* ${originalPlain}`,
-      });
-    }
+    await client.chat.postEphemeral({
+      channel: channelId,
+      user: body.user.id,
+      thread_ts: threadTs,
+      username: displayName,
+      icon_url: avatarUrl,
+      text: `✅ *Sent (→ ${targetCode})*\n*Original:* ${originalPlain}`,
+    });
   } catch (err) {
     logger.error('Error in translate_reply_modal submit:', err);
   }
