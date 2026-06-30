@@ -393,6 +393,35 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
   }
 });
 
+// ── Message shortcut: "Translate this message" ────────────────────────────
+// Right-click a message → translate it → show result only to you
+app.shortcut('translate_message', async ({ shortcut, ack, client, logger }) => {
+  await ack();
+  try {
+    const channelId = shortcut.channel?.id;
+    const userId = shortcut.user.id;
+    const messageText = shortcut.message?.text;
+    const threadTs = shortcut.message?.thread_ts || shortcut.message?.ts;
+
+    if (!messageText?.trim()) {
+      await client.chat.postEphemeral({ channel: channelId, user: userId, text: '❌ This message has no text to translate.' });
+      return;
+    }
+
+    const targetLang = await hashGet(KEYS.userIncomingLang, userId) || 'en';
+    const translated = await translate(messageText, targetLang);
+
+    await client.chat.postEphemeral({
+      channel: channelId,
+      user: userId,
+      thread_ts: threadTs,
+      text: `🌐 *Translation (only you see this):*\n${translated}`,
+    });
+  } catch (err) {
+    logger.error('Error in translate_message shortcut:', err);
+  }
+});
+
 // ── Message shortcut: "Translate & Reply" ─────────────────────────────────
 // Right-click a message → shortcut fires → modal opens immediately
 app.shortcut('translate_reply', async ({ shortcut, ack, client, logger }) => {
