@@ -410,12 +410,15 @@ function translateReplyModalView(channelId, threadTs) {
 // ── Incoming: auto-translate messages in monitored channels ────────────────
 app.event('message', async ({ event, client, logger }) => {
   try {
-    if (event.subtype || event.bot_id) return;
-    if (!event.text?.trim()) return;
+    logger.info(`[msg] channel=${event.channel} user=${event.user} subtype=${event.subtype} bot_id=${event.bot_id} thread_ts=${event.thread_ts}`);
+
+    if (event.subtype || event.bot_id) { logger.info('[msg] skipped: subtype/bot'); return; }
+    if (!event.text?.trim()) { logger.info('[msg] skipped: no text'); return; }
 
     const isMonitoredChannel = await setHas(KEYS.monitoredChannels, event.channel);
     const isMonitoredDM = event.channel_type === 'im' && await setHas(KEYS.monitoredDmUsers, event.user);
 
+    logger.info(`[msg] isMonitoredChannel=${isMonitoredChannel} isMonitoredDM=${isMonitoredDM}`);
     if (!isMonitoredChannel && !isMonitoredDM) return;
 
     const allSubscribers = await setAll(KEYS.subscribers);
