@@ -204,14 +204,14 @@ function protect(text) {
   for (const pattern of PROTECT_PATTERNS) {
     result = result.replace(pattern, (match) => {
       stash.push(match);
-      return `<z${stash.length - 1}/>`;  // XML-style tags that Google Translate preserves
+      return `<!--z${stash.length - 1}-->`;  // HTML comments are never touched by Google Translate
     });
   }
   return { masked: result, stash };
 }
 
 function restore(masked, stash) {
-  return masked.replace(/<z(\d+)\/>/g, (_, i) => stash[Number(i)] ?? _);
+  return masked.replace(/<!--z(\d+)-->/g, (_, i) => stash[Number(i)] ?? _);
 }
 
 function googleTranslateRaw(text, targetCode) {
