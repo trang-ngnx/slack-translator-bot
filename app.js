@@ -616,24 +616,14 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
           ...(command.thread_ts ? { thread_ts: command.thread_ts } : {}),
         });
 
-        // Post original as a private thread reply under the sent message.
-        // Uses the user's own token so it appears in their thread view.
-        // Falls back to a bot DM if the user hasn't done /ed login.
-        if (sent?.ts) {
-          const userClient = await clientFor(command.user_id);
-          if (userClient) {
-            await userClient.chat.postMessage({
-              channel: command.channel_id,
-              thread_ts: sent.ts,
-              text: `📝 _(only you see this)_ *Original (→ ${targetLabel}):* ${messageText}`,
-            });
-          } else {
-            await client.chat.postMessage({
-              channel: command.user_id,
-              text: `📝 *Original you just sent (→ ${targetLabel}):*\n${messageText}`,
-            });
-          }
-        }
+        // Ephemeral confirmation — only visible to sender, appears right below the sent message
+        await client.chat.postEphemeral({
+          channel: command.channel_id,
+          user: command.user_id,
+          username: displayName,
+          icon_url: avatarUrl,
+          text: `✅ *Sent (→ ${targetLabel})* — only you see this\n*Original:* ${messageText}`,
+        });
 
         // Notify viewers
         await notifyViewers(client, {
@@ -832,23 +822,16 @@ app.view('translate_reply_modal', async ({ view, ack, client, body, logger }) =>
       blocks: [{ type: 'rich_text', elements: translatedRichText.elements }],
     });
 
-    // Post original as a private thread reply under the sent message.
+    // Ephemeral confirmation — only visible to sender, appears right below the sent message
     const originalPlain = richTextToPlain(richTextValue);
-    if (sent?.ts) {
-      const userClient = await clientFor(body.user.id);
-      if (userClient) {
-        await userClient.chat.postMessage({
-          channel: channelId,
-          thread_ts: sent.ts,
-          text: `📝 _(only you see this)_ *Original (→ ${targetCode}):* ${originalPlain}`,
-        });
-      } else {
-        await client.chat.postMessage({
-          channel: body.user.id,
-          text: `📝 *Original you just sent (→ ${targetCode}):*\n${originalPlain}`,
-        });
-      }
-    }
+    await client.chat.postEphemeral({
+      channel: channelId,
+      user: body.user.id,
+      thread_ts: threadTs,
+      username: displayName,
+      icon_url: avatarUrl,
+      text: `✅ *Sent (→ ${targetCode})* — only you see this\n*Original:* ${originalPlain}`,
+    });
 
     // Notify viewers
     await notifyViewers(client, {
