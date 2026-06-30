@@ -394,61 +394,15 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
 });
 
 // ── Message shortcut: "Translate & Reply" ─────────────────────────────────
-// Step 1: User right-clicks a message → shortcut fires → post ephemeral with button
+// Right-click a message → shortcut fires → modal opens immediately
 app.shortcut('translate_reply', async ({ shortcut, ack, client, logger }) => {
   await ack();
   try {
     const channelId = shortcut.channel?.id;
     const threadTs = shortcut.message?.thread_ts || shortcut.message?.ts;
-    const messageTs = shortcut.message?.ts;
-
-    if (!channelId) {
-      await client.chat.postMessage({
-        channel: shortcut.user.id,
-        text: '❌ This shortcut only works in channels, not in DMs.',
-      });
-      return;
-    }
-
-    await client.chat.postEphemeral({
-      channel: channelId,
-      user: shortcut.user.id,
-      text: '💬 Want to reply to this thread with a translated message?',
-      blocks: [
-        {
-          type: 'section',
-          text: {
-            type: 'mrkdwn',
-            text: '💬 *Want to reply to this thread with a translated message?*\nOnly you can see this.',
-          },
-        },
-        {
-          type: 'actions',
-          elements: [
-            {
-              type: 'button',
-              text: { type: 'plain_text', text: 'Reply with translated message', emoji: true },
-              style: 'primary',
-              action_id: 'open_translate_modal',
-              value: JSON.stringify({ channelId, threadTs, messageTs }),
-            },
-          ],
-        },
-      ],
-    });
-  } catch (err) {
-    logger.error('Error in translate_reply shortcut:', err);
-  }
-});
-
-// Step 2: Button click → open modal with text input
-app.action('open_translate_modal', async ({ body, ack, client, logger }) => {
-  await ack();
-  try {
-    const { channelId, threadTs } = JSON.parse(body.actions[0].value);
 
     await client.views.open({
-      trigger_id: body.trigger_id,
+      trigger_id: shortcut.trigger_id,
       view: {
         type: 'modal',
         callback_id: 'translate_reply_modal',
@@ -484,7 +438,7 @@ app.action('open_translate_modal', async ({ body, ack, client, logger }) => {
       },
     });
   } catch (err) {
-    logger.error('Error opening translate modal:', err);
+    logger.error('Error in translate_reply shortcut:', err);
   }
 });
 
