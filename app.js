@@ -628,11 +628,11 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
           text: `✅ *Sent (→ ${targetLabel})* — only you see this\n*Original:* ${messageText}`,
         });
 
-        // Notify viewers
+        // Notify viewers — post in the thread of the sent message
         await notifyViewers(client, {
           senderId: command.user_id,
           channelId: command.channel_id,
-          threadTs: command.thread_ts || null,
+          threadTs: sentTs,
           senderName: displayName,
           originalText: messageText,
           translatedBlocks: translatedRichText.elements,
@@ -838,11 +838,11 @@ app.view('translate_reply_modal', async ({ view, ack, client, body, logger }) =>
       text: `✅ *Sent (→ ${targetCode})* — only you see this\n*Original:* ${originalPlain}`,
     });
 
-    // Notify viewers
+    // Notify viewers — post in the thread of the sent message
     await notifyViewers(client, {
       senderId: body.user.id,
       channelId,
-      threadTs,
+      threadTs: sentTs || threadTs,
       senderName: displayName,
       originalText: originalPlain,
       translatedBlocks: translatedRichText.elements,
