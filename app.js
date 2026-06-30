@@ -487,7 +487,7 @@ app.event('message', async ({ event, client, logger }) => {
 app.command('/ed', async ({ command, ack, client, logger }) => {
   await ack();
 
-  const USAGE = 'Available commands:\n• `/ed join` — subscribe to auto-translations\n• `/ed leave` — unsubscribe\n• `/ed lang [language]` — set your preferred incoming translation language\n• `/ed watch` — monitor this channel\n• `/ed unwatch` — stop monitoring this channel\n• `/ed dm-watch @user` — monitor DMs from a user sent to the bot\n• `/ed dm-unwatch @user` — stop monitoring\n• `/ed send [language]` — set default outgoing language for this channel\n• `/ed send [message]` — translate and post to channel\n• `/ed trans [link or text]` — translate privately\n• `/ed recap [N]` — show last N translated messages in this conversation (default 10; works in DMs, channels, and threads)\n• `/ed viewers add @alice @bob` — let colleagues privately see your translations here\n• `/ed viewers remove @alice` | `list` | `clear`\n• `/ed login` — authorize so your messages send without the "App" badge\n• `/ed logout` — remove your authorization';
+  const USAGE = 'Available commands:\n• `/ed join` — subscribe to auto-translations\n• `/ed leave` — unsubscribe\n• `/ed lang [language]` — set your preferred incoming translation language\n• `/ed watch` — monitor this channel\n• `/ed unwatch` — stop monitoring this channel\n• `/ed dm-watch @user` — monitor DMs from a user sent to the bot\n• `/ed dm-unwatch @user` — stop monitoring\n• `/ed send [language]` — set default outgoing language for this channel\n• `/ed send [message]` — translate and post to channel\n• `/ed trans [link or text]` — translate privately\n• `/ed recap [N]` — show last N translated messages here (default 10; works in DMs, channels, and threads)\n• `/ed recap [message link]` — show the full translated thread for a specific message (paste a Slack message link)\n• `/ed viewers add @alice @bob` — let colleagues privately see your translations here\n• `/ed viewers remove @alice` | `list` | `clear`\n• `/ed login` — authorize so your messages send without the "App" badge\n• `/ed logout` — remove your authorization';
 
   const isDM = command.channel_id.startsWith('D');
   async function reply(text) {
@@ -713,15 +713,63 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
 
     // ── ed recap ───────────────────────────────────────────────────────────
     } else if (subcommand === 'recap') {
-      const count = Math.min(Math.max(parseInt(args) || 10, 1), 20);
       const targetLang = await hashGet(KEYS.userIncomingLang, command.user_id) || 'en';
       const targetCode = getLangCode(targetLang);
 
       let rawMessages = [];
       let contextLabel = '';
 
-      if (command.thread_ts) {
-        // Thread: fetch replies (includes parent as first message)
+      // Detect a Slack message link anywhere in args.
+      // Parent link:  .../archives/CHANNEL/p0123456789012345
+      // Reply link:   .../archives/CHANNEL/p0123456789012345?thread_ts=0123456789.012345&cid=...
+      const linkMatch = args.match(/\/archives\/([A-Z0-9]+)\/p(\d{10})(\d{6})/);
+
+      if (linkMatch) {
+        const targetChannelId = linkMatch[1];
+        const messageTs = `${linkMatch[2]}.${linkMatch[3]}`;
+
+        // thread_ts query param is present when the link points to a thread reply
+        const threadTsParam = args.match(/[?&]thread_ts=([\d.]+)/)?.[1];
+
+        // Count may be passed alongside the link: "/ed recap [link] 15"
+        const argsWithoutLink = args.split(/\s+/).filter(w => !w.startsWith('http') && !w.includes('/archives/')).join(' ');
+        const count = Math.min(Math.max(parseInt(argsWithoutLink) || 20, 1), 20);
+
+        let threadTs = threadTsParam || null;
+
+        if (!threadTs) {
+          // No thread_ts in URL → the link points to a top-level message.
+          // Fetch it from history to confirm and get its thread_ts if it has one.
+          try {
+            const histResult = await client.conversations.history({
+              channel: targetChannelId,
+              latest: messageTs,
+              inclusive: true,
+              limit: 1,
+            });
+            const msg = histResult.messages?.[0];
+            threadTs = (msg?.ts === messageTs && msg.thread_ts) ? msg.thread_ts : messageTs;
+          } catch (_) {
+            threadTs = messageTs;
+          }
+        }
+
+        try {
+          const result = await client.conversations.replies({
+            channel: targetChannelId,
+            ts: threadTs,
+            limit: count + 15,
+          });
+          rawMessages = (result.messages || [])
+            .filter(m => !m.bot_id && !m.subtype && m.text?.trim())
+            .slice(-count);
+          contextLabel = 'linked thread';
+        } catch (err) {
+          await reply('❌ Could not fetch that thread. Make sure the bot is in that channel.\n\nTip: if you linked to a thread reply, try sharing the parent message link instead.');
+          return;
+        }
+      } else if (command.thread_ts) {
+        const count = Math.min(Math.max(parseInt(args) || 10, 1), 20);
         const result = await client.conversations.replies({
           channel: command.channel_id,
           ts: command.thread_ts,
@@ -732,7 +780,7 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
           .slice(-count);
         contextLabel = 'thread';
       } else {
-        // Channel or DM: fetch history (newest first → reverse to oldest first)
+        const count = Math.min(Math.max(parseInt(args) || 10, 1), 20);
         const result = await client.conversations.history({
           channel: command.channel_id,
           limit: count + 15,
@@ -745,7 +793,7 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
       }
 
       if (!rawMessages.length) {
-        await reply('❌ No messages found in recent history.');
+        await reply('❌ No messages found.');
         return;
       }
 
@@ -787,7 +835,7 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
       }
 
       if (!lines.length) {
-        await reply('❌ No readable messages found in recent history.');
+        await reply('❌ No readable messages found.');
         return;
       }
 
