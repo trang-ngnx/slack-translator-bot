@@ -616,10 +616,11 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
           ...(command.thread_ts ? { thread_ts: command.thread_ts } : {}),
         });
 
-        // Confirmation appears right below the sent message, shown as the user
+        // Confirmation appears as a thread reply under the sent message, only visible to sender
         await client.chat.postEphemeral({
           channel: command.channel_id,
           user: command.user_id,
+          thread_ts: sent?.ts,
           username: displayName,
           icon_url: avatarUrl,
           text: `✅ *Sent (→ ${targetLabel})*\n*Original:* ${messageText}`,
