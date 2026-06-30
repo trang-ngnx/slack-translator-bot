@@ -487,7 +487,7 @@ app.event('message', async ({ event, client, logger }) => {
 app.command('/ed', async ({ command, ack, client, logger }) => {
   await ack();
 
-  const USAGE = 'Available commands:\n• `/ed join` — subscribe to auto-translations\n• `/ed leave` — unsubscribe\n• `/ed lang [language]` — set your preferred incoming translation language\n• `/ed watch` — monitor this channel\n• `/ed unwatch` — stop monitoring this channel\n• `/ed dm-watch @user` — monitor DMs from a user sent to the bot\n• `/ed dm-unwatch @user` — stop monitoring\n• `/ed send [language]` — set default outgoing language for this channel\n• `/ed send [message]` — translate and post to channel\n• `/ed trans [link or text]` — translate privately\n• `/ed viewers add @alice @bob` — let colleagues privately see your translations here\n• `/ed viewers remove @alice` | `list` | `clear`\n• `/ed login` — authorize so your messages send without the "App" badge\n• `/ed logout` — remove your authorization';
+  const USAGE = 'Available commands:\n• `/ed join` — subscribe to auto-translations\n• `/ed leave` — unsubscribe\n• `/ed lang [language]` — set your preferred incoming translation language\n• `/ed watch` — monitor this channel\n• `/ed unwatch` — stop monitoring this channel\n• `/ed dm-watch @user` — monitor DMs from a user sent to the bot\n• `/ed dm-unwatch @user` — stop monitoring\n• `/ed send [language]` — set default outgoing language for this channel\n• `/ed send [message]` — translate and post to channel\n• `/ed trans [link or text]` — translate privately\n• `/ed recap [N]` — show last N translated messages in this conversation (default 10; works in DMs, channels, and threads)\n• `/ed viewers add @alice @bob` — let colleagues privately see your translations here\n• `/ed viewers remove @alice` | `list` | `clear`\n• `/ed login` — authorize so your messages send without the "App" badge\n• `/ed logout` — remove your authorization';
 
   const isDM = command.channel_id.startsWith('D');
   async function reply(text) {
@@ -710,6 +710,88 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
 
       const translated = await translate(textToTranslate, 'English');
       await reply(`🌐 *Translation (only you see this):*\n${translated}`);
+
+    // ── ed recap ───────────────────────────────────────────────────────────
+    } else if (subcommand === 'recap') {
+      const count = Math.min(Math.max(parseInt(args) || 10, 1), 20);
+      const targetLang = await hashGet(KEYS.userIncomingLang, command.user_id) || 'en';
+      const targetCode = getLangCode(targetLang);
+
+      let rawMessages = [];
+      let contextLabel = '';
+
+      if (command.thread_ts) {
+        // Thread: fetch replies (includes parent as first message)
+        const result = await client.conversations.replies({
+          channel: command.channel_id,
+          ts: command.thread_ts,
+          limit: count + 15,
+        });
+        rawMessages = (result.messages || [])
+          .filter(m => !m.bot_id && !m.subtype && m.text?.trim())
+          .slice(-count);
+        contextLabel = 'thread';
+      } else {
+        // Channel or DM: fetch history (newest first → reverse to oldest first)
+        const result = await client.conversations.history({
+          channel: command.channel_id,
+          limit: count + 15,
+        });
+        rawMessages = (result.messages || [])
+          .filter(m => !m.bot_id && !m.subtype && m.text?.trim())
+          .slice(0, count)
+          .reverse();
+        contextLabel = isDM ? 'DM' : 'channel';
+      }
+
+      if (!rawMessages.length) {
+        await reply('❌ No messages found in recent history.');
+        return;
+      }
+
+      // Cache user display names to avoid duplicate API calls
+      const nameCache = {};
+      async function resolveDisplayName(userId) {
+        if (nameCache[userId]) return nameCache[userId];
+        try {
+          const info = await client.users.info({ user: userId });
+          const name = info.user?.profile?.display_name || info.user?.profile?.real_name || 'Unknown';
+          nameCache[userId] = name;
+          return name;
+        } catch (_) {
+          nameCache[userId] = 'Unknown';
+          return 'Unknown';
+        }
+      }
+
+      const lines = [];
+      for (const msg of rawMessages) {
+        const senderName = msg.user ? await resolveDisplayName(msg.user) : (msg.username || 'Unknown');
+        const timeStr = new Date(parseFloat(msg.ts) * 1000)
+          .toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+
+        let translatedText = msg.text;
+        try {
+          const detectJson = await googleTranslateRaw(msg.text.slice(0, 200), targetCode);
+          const detectedLang = detectJson[2];
+          if (detectedLang && detectedLang !== targetCode) {
+            translatedText = await translate(msg.text, targetLang);
+          }
+        } catch (_) {}
+
+        if (translatedText !== msg.text) {
+          lines.push(`*${senderName}* (${timeStr}):\n_${msg.text}_\n→ ${translatedText}`);
+        } else {
+          lines.push(`*${senderName}* (${timeStr}):\n${msg.text}`);
+        }
+      }
+
+      if (!lines.length) {
+        await reply('❌ No readable messages found in recent history.');
+        return;
+      }
+
+      await reply(`📋 *Last ${lines.length} messages in this ${contextLabel} (→ ${targetCode}) — only you see this:*\n\n${lines.join('\n\n─────\n')}`);
 
     // ── ed viewers ─────────────────────────────────────────────────────────
     } else if (subcommand === 'viewers') {
