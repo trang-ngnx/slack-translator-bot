@@ -284,8 +284,9 @@ async function translateRichText(richText, targetLang) {
 
     for (const el of items) {
       if (el.type === 'text' && el.text?.trim() && !el.style?.code) {
-        const json = await googleTranslateRaw(el.text, targetCode);
-        el.text = json[0].map(c => c[0]).join('');
+        const { masked, stash } = protect(el.text);
+        const json = await googleTranslateRaw(masked, targetCode);
+        el.text = restore(json[0].map(c => c[0]).join(''), stash);
       }
     }
   }
