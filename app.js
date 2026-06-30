@@ -298,18 +298,28 @@ async function translateRichText(richText, targetLang) {
 // element-by-element and posted as a native rich_text block (avoids marker rendering issues)
 function mrkdwnToRichText(text) {
   const elements = [];
-  const FORMAT_RE = /(\*[^*\n]+\*|_[^_\n]+_|~[^~\n]+~|`[^`\n]+`)/g;
+  // Match Slack links <url|label>, Slack entities <@U...>/<#C...>, formatting markers, and emoji shortcodes
+  const TOKEN_RE = /<(https?:\/\/[^|>]+)\|([^>]+)>|<(https?:\/\/[^>]+)>|(\*[^*\n]+\*|_[^_\n]+_|~[^~\n]+~|`[^`\n]+`)/g;
   let last = 0;
   let m;
-  while ((m = FORMAT_RE.exec(text)) !== null) {
+  while ((m = TOKEN_RE.exec(text)) !== null) {
     if (m.index > last) elements.push({ type: 'text', text: text.slice(last, m.index) });
-    const marker = m[0][0];
-    const inner = m[0].slice(1, -1);
-    const style = marker === '*' ? { bold: true }
-                : marker === '_' ? { italic: true }
-                : marker === '~' ? { strike: true }
-                : { code: true };
-    elements.push({ type: 'text', text: inner, style });
+    if (m[1]) {
+      // <url|label> → link element with display label
+      elements.push({ type: 'link', url: m[1], text: m[2] });
+    } else if (m[3]) {
+      // <url> → bare link
+      elements.push({ type: 'link', url: m[3] });
+    } else {
+      // formatting markers *bold* _italic_ ~strike~ `code`
+      const marker = m[4][0];
+      const inner = m[4].slice(1, -1);
+      const style = marker === '*' ? { bold: true }
+                  : marker === '_' ? { italic: true }
+                  : marker === '~' ? { strike: true }
+                  : { code: true };
+      elements.push({ type: 'text', text: inner, style });
+    }
     last = m.index + m[0].length;
   }
   if (last < text.length) elements.push({ type: 'text', text: text.slice(last) });
@@ -698,8 +708,30 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
         await reply('Usage:\n• `/ed viewers add @alice @bob`\n• `/ed viewers remove @alice`\n• `/ed viewers list`\n• `/ed viewers clear`');
       }
 
+    } else if (subcommand === 'newbie') {
+      await reply(
+        `👋 *Welcome to the ED Translator Bot!*\n\nHere's how to get started:\n\n` +
+        `*1. Subscribe to translations*\n` +
+        `Run \`/ed join\` — you'll start receiving private translations for new messages in monitored channels.\n\n` +
+        `*2. Set your language*\n` +
+        `Run \`/ed lang Vietnamese\` (or any language) to receive translations in your preferred language.\n\n` +
+        `*3. Monitor a channel*\n` +
+        `In the channel you want to watch, run \`/ed watch\`. Now every new message there will be translated privately for subscribers.\n\n` +
+        `*4. Send translated messages*\n` +
+        `Use \`/ed send [your message]\` to translate and post your message in this channel.\n` +
+        `Or right-click any message → *More message shortcuts* → *Translate & Reply* to reply in thread.\n\n` +
+        `*5. Post as yourself (recommended)*\n` +
+        `Run \`/ed login\` to authorize the bot to post as you — your messages won't show an "App" badge.\n\n` +
+        `*6. Let teammates see your translations*\n` +
+        `Run \`/ed viewers add @alice @bob\` so they privately see what you send (translated) in this channel.\n\n` +
+        `Run \`/ed\` anytime to see all available commands.`
+      );
+
+    } else if (!subcommand) {
+      await reply(USAGE);
+
     } else {
-      await reply(`❌ Unknown command \`${subcommand}\`.\n${USAGE}`);
+      await reply(`❌ Unknown command \`${subcommand}\`.\n\n${USAGE}`);
     }
   } catch (err) {
     logger.error('Error in /ed:', err);
