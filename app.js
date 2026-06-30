@@ -356,6 +356,10 @@ app.event('message', async ({ event, client, logger }) => {
     const isThreadReply = !!event.thread_ts && event.thread_ts !== event.ts;
     const ctx = JSON.stringify({ channelId: event.channel, threadTs: event.thread_ts || event.ts, messageTs: event.ts });
 
+    // Fetch sender's display name once for all subscribers
+    const senderInfo = await client.users.info({ user: event.user });
+    const senderName = senderInfo.user?.profile?.display_name || senderInfo.user?.profile?.real_name || 'Someone';
+
     for (const userId of allSubscribers) {
       if (userId === event.user) continue;
       const targetLang = await hashGet(KEYS.userIncomingLang, userId) || 'en';
@@ -364,18 +368,18 @@ app.event('message', async ({ event, client, logger }) => {
         const translated = await translate(event.text, targetLang);
         await client.chat.postMessage({
           channel: userId,
-          text: `🌐 *[Translation from DM]*\n${translated}`,
+          text: `🌐 *[${senderName} — DM Translation]*\n${translated}`,
         });
       } else if (isThreadReply) {
         await client.chat.postEphemeral({
           channel: event.channel,
           user: userId,
           thread_ts: event.thread_ts,
-          text: '💬 New thread message — what would you like to do?',
+          text: `💬 New message from ${senderName} — what would you like to do?`,
           blocks: [
             {
               type: 'section',
-              text: { type: 'mrkdwn', text: '💬 *New message in thread* — only you see this.' },
+              text: { type: 'mrkdwn', text: `💬 *New message from ${senderName}* — only you see this.` },
             },
             {
               type: 'actions',
@@ -402,7 +406,7 @@ app.event('message', async ({ event, client, logger }) => {
         await client.chat.postEphemeral({
           channel: event.channel,
           user: userId,
-          text: `🌐 *[Translation]*\n${translated}`,
+          text: `🌐 *[${senderName}]* ${translated}`,
         });
       }
     }
@@ -582,7 +586,7 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
         const displayName = profile?.display_name || profile?.real_name || 'Unknown';
         const avatarUrl = profile?.image_72;
 
-        await postAsUser(client, command.user_id, {
+        const sent = await postAsUser(client, command.user_id, {
           channel: command.channel_id,
           text: plainFallback,
           username: displayName,
@@ -591,7 +595,14 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
           ...(command.thread_ts ? { thread_ts: command.thread_ts } : {}),
         });
 
-        await reply(`✅ *Sent (→ ${targetLabel})*\n*Original:* ${messageText}\n*Translated:* ${plainFallback}`);
+        // Post confirmation as a thread reply to the sent message (only visible to sender)
+        const sentTs = sent?.ts;
+        await client.chat.postEphemeral({
+          channel: command.channel_id,
+          user: command.user_id,
+          thread_ts: sentTs,
+          text: `✅ *Sent (→ ${targetLabel})*\n*Original:* ${messageText}`,
+        });
       }
 
     } else if (subcommand === 'trans') {
@@ -644,11 +655,19 @@ app.action('thread_translate_msg', async ({ body, ack, client, logger }) => {
     const targetLang = await hashGet(KEYS.userIncomingLang, userId) || 'en';
     const translated = await translate(message.text, targetLang);
 
+    // Get sender name for context
+    let senderLabel = '';
+    if (message.user) {
+      const senderInfo = await client.users.info({ user: message.user });
+      const name = senderInfo.user?.profile?.display_name || senderInfo.user?.profile?.real_name;
+      if (name) senderLabel = ` — *${name}*`;
+    }
+
     await client.chat.postEphemeral({
       channel: channelId,
       user: userId,
       thread_ts: threadTs,
-      text: `🌐 *Translation (only you see this):*\n${translated}`,
+      text: `🌐 *Translation${senderLabel}* (only you see this):\n${translated}`,
     });
   } catch (err) {
     logger.error('Error in thread_translate_msg:', err);
@@ -729,7 +748,7 @@ app.view('translate_reply_modal', async ({ view, ack, client, body, logger }) =>
     const displayName = profile?.display_name || profile?.real_name || 'Unknown';
     const avatarUrl = profile?.image_72;
 
-    await postAsUser(client, body.user.id, {
+    const sent = await postAsUser(client, body.user.id, {
       channel: channelId,
       thread_ts: threadTs,
       text: plainFallback,
@@ -737,6 +756,17 @@ app.view('translate_reply_modal', async ({ view, ack, client, body, logger }) =>
       icon_url: avatarUrl,
       blocks: [{ type: 'rich_text', elements: translatedRichText.elements }],
     });
+
+    // Post confirmation as a thread reply to the sent message (only visible to sender)
+    const originalPlain = richTextToPlain(richTextValue);
+    if (sent?.ts) {
+      await client.chat.postEphemeral({
+        channel: channelId,
+        user: body.user.id,
+        thread_ts: sent.ts,
+        text: `✅ *Sent (→ ${targetCode})*\n*Original:* ${originalPlain}`,
+      });
+    }
   } catch (err) {
     logger.error('Error in translate_reply_modal submit:', err);
   }
