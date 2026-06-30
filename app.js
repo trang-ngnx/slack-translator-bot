@@ -420,7 +420,15 @@ app.event('message', async ({ event, client, logger }) => {
 
     const allSubscribers = await setAll(KEYS.subscribers);
     const isThreadReply = !!event.thread_ts && event.thread_ts !== event.ts;
-    const ctx = JSON.stringify({ channelId: event.channel, threadTs: event.thread_ts || event.ts, messageTs: event.ts });
+    const threadTs = event.thread_ts || event.ts;
+    const ctx = JSON.stringify({ channelId: event.channel, threadTs, messageTs: event.ts });
+
+    // Detect source language once (used to skip messages already in user's target language)
+    let detectedLang = null;
+    try {
+      const detectJson = await googleTranslateRaw(event.text.slice(0, 200), 'en');
+      detectedLang = detectJson[2] || null;
+    } catch (_) {}
 
     // Fetch sender's display name once for all subscribers
     const senderInfo = await client.users.info({ user: event.user });
@@ -428,7 +436,12 @@ app.event('message', async ({ event, client, logger }) => {
 
     for (const userId of allSubscribers) {
       if (userId === event.user) continue;
+
       const targetLang = await hashGet(KEYS.userIncomingLang, userId) || 'en';
+      const targetCode = getLangCode(targetLang);
+
+      // Skip if message is already in the user's target language
+      if (detectedLang && detectedLang === targetCode) continue;
 
       if (isMonitoredDM) {
         const translated = await translate(event.text, targetLang);
@@ -436,38 +449,35 @@ app.event('message', async ({ event, client, logger }) => {
           channel: userId,
           text: `🌐 *[${senderName} — DM Translation]*\n${translated}`,
         });
-      } else if (isThreadReply) {
+      } else {
         const translated = await translate(event.text, targetLang);
+        const actionButtons = [
+          {
+            type: 'button',
+            text: { type: 'plain_text', text: '🌐 Translate this message', emoji: true },
+            action_id: 'thread_translate_msg',
+            value: ctx,
+          },
+          {
+            type: 'button',
+            text: { type: 'plain_text', text: '✏️ Reply with translation', emoji: true },
+            style: 'primary',
+            action_id: 'thread_open_reply_modal',
+            value: ctx,
+          },
+        ];
         await client.chat.postEphemeral({
           channel: event.channel,
           user: userId,
-          thread_ts: event.thread_ts,
+          ...(isThreadReply ? { thread_ts: threadTs } : {}),
           text: `🌐 *[${senderName}]* ${translated}`,
           blocks: [
             {
               type: 'section',
               text: { type: 'mrkdwn', text: `🌐 *[${senderName}]* ${translated}` },
             },
-            {
-              type: 'actions',
-              elements: [
-                {
-                  type: 'button',
-                  text: { type: 'plain_text', text: '✏️ Reply with translation', emoji: true },
-                  style: 'primary',
-                  action_id: 'thread_open_reply_modal',
-                  value: ctx,
-                },
-              ],
-            },
+            { type: 'actions', elements: actionButtons },
           ],
-        });
-      } else {
-        const translated = await translate(event.text, targetLang);
-        await client.chat.postEphemeral({
-          channel: event.channel,
-          user: userId,
-          text: `🌐 *[${senderName}]* ${translated}`,
         });
       }
     }
