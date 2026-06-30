@@ -194,7 +194,7 @@ function getLangCode(input) {
 const PROTECT_PATTERNS = [
   /```[\s\S]*?```/g,
   /`[^`]+`/g,
-  /<[^\s][^>]*>/g,
+  /<(?:[@#!]|https?:\/\/)[^>]*>/g,  // Slack entities: <@U...>, <#C...>, <http...>, <!...>
   /:[a-z0-9_+\-']+:/g,
 ];
 
@@ -204,14 +204,14 @@ function protect(text) {
   for (const pattern of PROTECT_PATTERNS) {
     result = result.replace(pattern, (match) => {
       stash.push(match);
-      return `‹${stash.length - 1}›`;
+      return `<z${stash.length - 1}/>`;  // XML-style tags that Google Translate preserves
     });
   }
   return { masked: result, stash };
 }
 
 function restore(masked, stash) {
-  return masked.replace(/‹(\d+)›/g, (_, i) => stash[Number(i)] ?? _);
+  return masked.replace(/<z(\d+)\/>/g, (_, i) => stash[Number(i)] ?? _);
 }
 
 function googleTranslateRaw(text, targetCode) {
