@@ -267,6 +267,28 @@ async function translateRichText(richText, targetLang) {
   return clone;
 }
 
+// Convert mrkdwn string to a rich_text block structure so it can be translated
+// element-by-element and posted as a native rich_text block (avoids marker rendering issues)
+function mrkdwnToRichText(text) {
+  const elements = [];
+  const FORMAT_RE = /(\*[^*\n]+\*|_[^_\n]+_|~[^~\n]+~|`[^`\n]+`)/g;
+  let last = 0;
+  let m;
+  while ((m = FORMAT_RE.exec(text)) !== null) {
+    if (m.index > last) elements.push({ type: 'text', text: text.slice(last, m.index) });
+    const marker = m[0][0];
+    const inner = m[0].slice(1, -1);
+    const style = marker === '*' ? { bold: true }
+                : marker === '_' ? { italic: true }
+                : marker === '~' ? { strike: true }
+                : { code: true };
+    elements.push({ type: 'text', text: inner, style });
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) elements.push({ type: 'text', text: text.slice(last) });
+  return { type: 'rich_text', elements: [{ type: 'rich_text_section', elements }] };
+}
+
 // Plain-text fallback for chat.postMessage `text` field (used alongside blocks)
 function richTextToPlain(richText) {
   if (!richText?.elements) return '';
@@ -546,11 +568,15 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
       }
 
       targetLabel = targetLabel || targetCode;
-      const translated = await translate(messageText, targetCode);
 
       if (isDM) {
+        const translated = await translate(messageText, targetCode);
         await reply(`📋 *Translation (→ ${targetLabel}):*\n\n${translated}`);
       } else {
+        const richText = mrkdwnToRichText(messageText);
+        const translatedRichText = await translateRichText(richText, targetCode);
+        const plainFallback = richTextToPlain(translatedRichText);
+
         const profileRes = await client.users.info({ user: command.user_id });
         const profile = profileRes.user?.profile;
         const displayName = profile?.display_name || profile?.real_name || 'Unknown';
@@ -558,14 +584,14 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
 
         await postAsUser(client, command.user_id, {
           channel: command.channel_id,
-          text: translated,
+          text: plainFallback,
           username: displayName,
           icon_url: avatarUrl,
-          blocks: [{ type: 'section', text: { type: 'mrkdwn', text: translated } }],
+          blocks: [{ type: 'rich_text', elements: translatedRichText.elements }],
           ...(command.thread_ts ? { thread_ts: command.thread_ts } : {}),
         });
 
-        await reply(`✅ *Sent (→ ${targetLabel})*\n*Original:* ${messageText}\n*Translated:* ${translated}`);
+        await reply(`✅ *Sent (→ ${targetLabel})*\n*Original:* ${messageText}\n*Translated:* ${plainFallback}`);
       }
 
     } else if (subcommand === 'trans') {
