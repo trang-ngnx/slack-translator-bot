@@ -142,23 +142,59 @@ app.event('message', async ({ event, client, logger }) => {
 
     const allSubscribers = await setAll(KEYS.subscribers);
 
+    const isThreadReply = !!event.thread_ts && event.thread_ts !== event.ts;
+    const ctx = JSON.stringify({ channelId: event.channel, threadTs: event.thread_ts || event.ts, messageTs: event.ts });
+
     // Send translation to every subscribed user except the sender
     for (const userId of allSubscribers) {
       if (userId === event.user) continue;
       const targetLang = await hashGet(KEYS.userIncomingLang, userId) || 'en';
-      const translated = await translate(event.text, targetLang);
 
       if (isMonitoredDM) {
+        const translated = await translate(event.text, targetLang);
         await client.chat.postMessage({
           channel: userId,
           text: `🌐 *[Translation from DM]*\n${translated}`,
         });
+      } else if (isThreadReply) {
+        // For thread messages: show action buttons instead of auto-translating
+        await client.chat.postEphemeral({
+          channel: event.channel,
+          user: userId,
+          thread_ts: event.thread_ts,
+          text: '💬 New thread message — what would you like to do?',
+          blocks: [
+            {
+              type: 'section',
+              text: { type: 'mrkdwn', text: '💬 *New message in thread* — only you see this.' },
+            },
+            {
+              type: 'actions',
+              elements: [
+                {
+                  type: 'button',
+                  text: { type: 'plain_text', text: '🌐 Translate this message', emoji: true },
+                  action_id: 'thread_translate_msg',
+                  value: ctx,
+                },
+                {
+                  type: 'button',
+                  text: { type: 'plain_text', text: '✏️ Reply with translation', emoji: true },
+                  style: 'primary',
+                  action_id: 'thread_open_reply_modal',
+                  value: ctx,
+                },
+              ],
+            },
+          ],
+        });
       } else {
+        // For non-thread channel messages: auto-translate as before
+        const translated = await translate(event.text, targetLang);
         await client.chat.postEphemeral({
           channel: event.channel,
           user: userId,
           text: `🌐 *[Translation]*\n${translated}`,
-          ...(event.thread_ts ? { thread_ts: event.thread_ts } : {}),
         });
       }
     }
@@ -390,6 +426,81 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
   } catch (err) {
     logger.error('Error in /ed:', err);
     await reply(`❌ Error: ${err.message}`);
+  }
+});
+
+// ── Thread button: "Translate this message" ───────────────────────────────
+app.action('thread_translate_msg', async ({ body, ack, client, logger }) => {
+  await ack(); // ack only — no respond(), so the button ephemeral stays visible
+  try {
+    const { channelId, threadTs, messageTs } = JSON.parse(body.actions[0].value);
+    const userId = body.user.id;
+
+    const result = await client.conversations.replies({ channel: channelId, ts: threadTs, inclusive: true, limit: 100 });
+    const message = result.messages?.find(m => m.ts === messageTs);
+    if (!message?.text) {
+      await client.chat.postEphemeral({ channel: channelId, user: userId, thread_ts: threadTs, text: '❌ Could not fetch the message.' });
+      return;
+    }
+
+    const targetLang = await hashGet(KEYS.userIncomingLang, userId) || 'en';
+    const translated = await translate(message.text, targetLang);
+
+    await client.chat.postEphemeral({
+      channel: channelId,
+      user: userId,
+      thread_ts: threadTs,
+      text: `🌐 *Translation (only you see this):*\n${translated}`,
+    });
+  } catch (err) {
+    logger.error('Error in thread_translate_msg:', err);
+  }
+});
+
+// ── Thread button: "Reply with translation" ────────────────────────────────
+app.action('thread_open_reply_modal', async ({ body, ack, client, logger }) => {
+  await ack(); // ack only — no respond(), so the button ephemeral stays visible
+  try {
+    const { channelId, threadTs } = JSON.parse(body.actions[0].value);
+
+    await client.views.open({
+      trigger_id: body.trigger_id,
+      view: {
+        type: 'modal',
+        callback_id: 'translate_reply_modal',
+        private_metadata: JSON.stringify({ channelId, threadTs }),
+        title: { type: 'plain_text', text: 'Translate & Reply' },
+        submit: { type: 'plain_text', text: 'Translate & Send' },
+        close: { type: 'plain_text', text: 'Cancel' },
+        blocks: [
+          {
+            type: 'input',
+            block_id: 'message_block',
+            label: { type: 'plain_text', text: 'Your message' },
+            element: {
+              type: 'plain_text_input',
+              action_id: 'message_input',
+              multiline: true,
+              placeholder: { type: 'plain_text', text: 'Type your message here…' },
+            },
+          },
+          {
+            type: 'input',
+            block_id: 'lang_block',
+            label: { type: 'plain_text', text: 'Target language (optional)' },
+            hint: { type: 'plain_text', text: 'e.g. ja, en, vi — leave blank to auto-detect from channel' },
+            optional: true,
+            element: {
+              type: 'plain_text_input',
+              action_id: 'lang_input',
+              placeholder: { type: 'plain_text', text: 'ja' },
+            },
+          },
+        ],
+      },
+    });
+  } catch (err) {
+    logger.error('Error in thread_open_reply_modal:', err);
   }
 });
 
