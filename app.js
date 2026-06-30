@@ -1,6 +1,8 @@
 require('dotenv').config();
-const { App } = require('@slack/bolt');
+const { App, ExpressReceiver } = require('@slack/bolt');
+const { WebClient } = require('@slack/web-api');
 const https = require('https');
+const http = require('http');
 const Redis = require('ioredis');
 
 // ── Config ─────────────────────────────────────────────────────────────────
@@ -16,6 +18,8 @@ const KEYS = {
   monitoredDmUsers:       'monitored_dm_users',
   userIncomingLang:       'user_incoming_lang',
   userChannelOutgoingLang:'user_channel_outgoing_lang',
+  userTokens:             'user_tokens',   // hash: userId → user OAuth token
+  oauthStates:            'oauth_states',  // hash: state → userId (expires quickly)
 };
 
 async function setAdd(key, value)    { await redis.sadd(key, value); }
@@ -41,13 +45,109 @@ async function seedFromEnv() {
   await seedSet(KEYS.monitoredDmUsers,  process.env.MONITORED_DM_USER_IDS);
 }
 
-// ── Slack app ──────────────────────────────────────────────────────────────
+// ── User token helpers ─────────────────────────────────────────────────────
+async function getUserToken(userId) {
+  return hashGet(KEYS.userTokens, userId);
+}
+
+// Returns a WebClient using the user's own token if available, otherwise bot token
+async function clientFor(userId) {
+  const userToken = await getUserToken(userId);
+  return userToken ? new WebClient(userToken) : null;
+}
+
+// Post a message as the real user (no App badge) if they've done /ed login,
+// otherwise fall back to posting with their name/avatar via the bot token.
+async function postAsUser(botClient, userId, params) {
+  const userClient = await clientFor(userId);
+  if (userClient) {
+    // Post directly as the user — no App badge, no custom username needed
+    const { username, icon_url, ...rest } = params;
+    return userClient.chat.postMessage(rest);
+  }
+  // Fallback: bot posts with user's display name and avatar
+  return botClient.chat.postMessage(params);
+}
+
+// ── Slack app (ExpressReceiver for custom OAuth route) ─────────────────────
+const receiver = new ExpressReceiver({
+  signingSecret: process.env.SLACK_SIGNING_SECRET,
+});
+
 const app = new App({
   token: process.env.SLACK_BOT_TOKEN,
-  signingSecret: process.env.SLACK_SIGNING_SECRET,
+  receiver,
   appToken: process.env.SLACK_APP_TOKEN,
   socketMode: process.env.SOCKET_MODE === 'true',
 });
+
+// ── OAuth callback route ───────────────────────────────────────────────────
+receiver.router.get('/oauth/callback', async (req, res) => {
+  const { code, state, error } = req.query;
+
+  if (error || !code || !state) {
+    return res.send('<p>Authorization failed or was cancelled. You can close this tab.</p>');
+  }
+
+  const userId = await hashGet(KEYS.oauthStates, state);
+  if (!userId) {
+    return res.send('<p>This link has expired. Please run <b>/ed login</b> again in Slack.</p>');
+  }
+
+  try {
+    // Exchange code for user token
+    const result = await exchangeOAuthCode(code);
+    const userToken = result.authed_user?.access_token;
+
+    if (!userToken) throw new Error('No user token in response');
+
+    await hashSet(KEYS.userTokens, userId, userToken);
+    await hashDel(KEYS.oauthStates, state);
+
+    // Notify user in Slack
+    await app.client.chat.postMessage({
+      channel: userId,
+      text: '✅ *You\'re all set!* Your messages will now be sent directly from you — no more "App" badge.',
+    });
+
+    res.send('<p>✅ Authorization successful! You can close this tab and return to Slack.</p>');
+  } catch (err) {
+    console.error('OAuth callback error:', err);
+    res.send('<p>Something went wrong. Please try <b>/ed login</b> again in Slack.</p>');
+  }
+});
+
+function exchangeOAuthCode(code) {
+  const redirectUri = process.env.SLACK_OAUTH_REDIRECT_URI;
+  const body = new URLSearchParams({
+    client_id: process.env.SLACK_CLIENT_ID,
+    client_secret: process.env.SLACK_CLIENT_SECRET,
+    code,
+    redirect_uri: redirectUri,
+  }).toString();
+
+  return new Promise((resolve, reject) => {
+    const req = https.request({
+      hostname: 'slack.com',
+      path: '/api/oauth.v2.access',
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': Buffer.byteLength(body) },
+    }, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        try {
+          const json = JSON.parse(data);
+          if (!json.ok) reject(new Error(json.error));
+          else resolve(json);
+        } catch (e) { reject(e); }
+      });
+    });
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
+}
 
 // ── Translation helpers ────────────────────────────────────────────────────
 const LANG_CODES = {
@@ -61,7 +161,6 @@ function getLangCode(input) {
   return LANG_CODES[lower] || lower;
 }
 
-// Protect Slack entities from translation mangling
 const PROTECT_PATTERNS = [
   /```[\s\S]*?```/g,
   /`[^`]+`/g,
@@ -105,11 +204,8 @@ async function translateSegment(text, targetCode) {
   return restore(json[0].map(c => c[0]).join(''), stash);
 }
 
-// Translate mrkdwn text while preserving bold/italic/strikethrough markers.
-// Each formatted span's inner text is translated separately so markers survive.
 async function translate(text, targetLanguage) {
   const targetCode = getLangCode(targetLanguage);
-  // Match *bold*, _italic_, ~strike~ spans
   const FORMAT_RE = /(\*[^*\n]+\*|_[^_\n]+_|~[^~\n]+~)/g;
 
   const segments = [];
@@ -144,7 +240,6 @@ async function detectChannelLanguage(client, channelId) {
 }
 
 // ── Rich text helpers ──────────────────────────────────────────────────────
-// Convert a Slack rich_text_input value to mrkdwn string
 function richTextSectionToMrkdwn(elements) {
   let out = '';
   for (const el of elements || []) {
@@ -247,7 +342,6 @@ app.event('message', async ({ event, client, logger }) => {
           text: `🌐 *[Translation from DM]*\n${translated}`,
         });
       } else if (isThreadReply) {
-        // Thread messages: show action buttons instead of auto-translating
         await client.chat.postEphemeral({
           channel: event.channel,
           user: userId,
@@ -296,7 +390,7 @@ app.event('message', async ({ event, client, logger }) => {
 app.command('/ed', async ({ command, ack, client, logger }) => {
   await ack();
 
-  const USAGE = 'Available commands:\n• `/ed join` — subscribe to auto-translations\n• `/ed leave` — unsubscribe\n• `/ed lang [language]` — set your preferred incoming translation language (e.g. Vietnamese)\n• `/ed watch` — monitor this channel\n• `/ed unwatch` — stop monitoring this channel\n• `/ed dm-watch @user` — monitor DMs from a user sent to the bot\n• `/ed dm-unwatch @user` — stop monitoring\n• `/ed send [language]` — set default outgoing language for this channel (e.g. Japanese)\n• `/ed send [message]` — translate and post to channel\n• `/ed trans [link or text]` — translate privately';
+  const USAGE = 'Available commands:\n• `/ed join` — subscribe to auto-translations\n• `/ed leave` — unsubscribe\n• `/ed lang [language]` — set your preferred incoming translation language\n• `/ed watch` — monitor this channel\n• `/ed unwatch` — stop monitoring this channel\n• `/ed dm-watch @user` — monitor DMs from a user sent to the bot\n• `/ed dm-unwatch @user` — stop monitoring\n• `/ed send [language]` — set default outgoing language for this channel\n• `/ed send [message]` — translate and post to channel\n• `/ed trans [link or text]` — translate privately\n• `/ed login` — authorize so your messages send without the "App" badge\n• `/ed logout` — remove your authorization';
 
   const isDM = command.channel_id.startsWith('D');
   async function reply(text) {
@@ -311,7 +405,34 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
     const [subcommand, ...rest] = (command.text || '').trim().split(/\s+/);
     const args = rest.join(' ').trim();
 
-    if (subcommand === 'join') {
+    // ── ed login ───────────────────────────────────────────────────────────
+    if (subcommand === 'login') {
+      const existingToken = await getUserToken(command.user_id);
+      if (existingToken) {
+        await reply('✅ You\'re already authorized. Your messages are sent directly from you.\nUse `/ed logout` to remove authorization.');
+        return;
+      }
+      const state = Math.random().toString(36).slice(2) + Date.now().toString(36);
+      await hashSet(KEYS.oauthStates, state, command.user_id);
+      // Expire state after 10 minutes
+      await redis.expire(KEYS.oauthStates, 600);
+
+      const redirectUri = encodeURIComponent(process.env.SLACK_OAUTH_REDIRECT_URI);
+      const authUrl = `https://slack.com/oauth/v2/authorize?client_id=${process.env.SLACK_CLIENT_ID}&user_scope=chat:write&redirect_uri=${redirectUri}&state=${state}`;
+
+      await client.chat.postMessage({
+        channel: command.user_id,
+        text: `🔑 *Authorize the translator to post as you*\n\nClick the link below — it only asks for permission to post messages on your behalf:\n\n<${authUrl}|Click here to authorize>\n\nThis link expires in 10 minutes.`,
+      });
+      await reply('📨 Check your DMs with the bot — I sent you a private authorization link.');
+
+    // ── ed logout ──────────────────────────────────────────────────────────
+    } else if (subcommand === 'logout') {
+      await hashDel(KEYS.userTokens, command.user_id);
+      await reply('✅ Authorization removed. Messages will now be sent via the bot with your name and avatar.');
+
+    // ── ed join ────────────────────────────────────────────────────────────
+    } else if (subcommand === 'join') {
       if (await setHas(KEYS.subscribers, command.user_id)) {
         await reply('✅ You\'re already subscribed to auto-translations.');
       } else {
@@ -382,7 +503,7 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
 
     } else if (subcommand === 'send') {
       if (!args) {
-        await reply('❌ Usage:\n• `/ed send [language]` — set default outgoing language for this channel (e.g. `/ed send Japanese`)\n• `/ed send [message]` — translate and post');
+        await reply('❌ Usage:\n• `/ed send [language]` — set default outgoing language for this channel\n• `/ed send [message]` — translate and post');
         return;
       }
 
@@ -393,7 +514,7 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
         const langCode = getLangCode(args);
         const key = `${command.user_id}:${command.channel_id}`;
         await hashSet(KEYS.userChannelOutgoingLang, key, langCode);
-        await reply(`✅ Default outgoing language for this channel set to *${langCode}*. Your next \`/ed send [message]\` will translate to ${langCode}.`);
+        await reply(`✅ Default outgoing language for this channel set to *${langCode}*.`);
         return;
       }
 
@@ -423,7 +544,6 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
       }
 
       targetLabel = targetLabel || targetCode;
-
       const translated = await translate(messageText, targetCode);
 
       if (isDM) {
@@ -434,7 +554,7 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
         const displayName = profile?.display_name || profile?.real_name || 'Unknown';
         const avatarUrl = profile?.image_72;
 
-        await client.chat.postMessage({
+        await postAsUser(client, command.user_id, {
           channel: command.channel_id,
           text: translated,
           username: displayName,
@@ -564,8 +684,6 @@ app.view('translate_reply_modal', async ({ view, ack, client, body, logger }) =>
   try {
     const { channelId, threadTs } = JSON.parse(view.private_metadata);
     const langInput = view.state.values.lang_block.lang_input.value?.trim();
-
-    // Read rich text input and convert to mrkdwn
     const richTextValue = view.state.values.message_block.message_input.rich_text_value;
     const messageText = richTextToMrkdwn(richTextValue);
 
@@ -582,7 +700,7 @@ app.view('translate_reply_modal', async ({ view, ack, client, body, logger }) =>
     const displayName = profile?.display_name || profile?.real_name || 'Unknown';
     const avatarUrl = profile?.image_72;
 
-    await client.chat.postMessage({
+    await postAsUser(client, body.user.id, {
       channel: channelId,
       thread_ts: threadTs,
       text: translated,
