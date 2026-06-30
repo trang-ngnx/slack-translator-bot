@@ -393,6 +393,139 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
   }
 });
 
+// ── Message shortcut: "Translate & Reply" ─────────────────────────────────
+// Step 1: User right-clicks a message → shortcut fires → post ephemeral with button
+app.shortcut('translate_reply', async ({ shortcut, ack, client, logger }) => {
+  await ack();
+  try {
+    const channelId = shortcut.channel?.id;
+    const threadTs = shortcut.message?.thread_ts || shortcut.message?.ts;
+    const messageTs = shortcut.message?.ts;
+
+    if (!channelId) {
+      await client.chat.postMessage({
+        channel: shortcut.user.id,
+        text: '❌ This shortcut only works in channels, not in DMs.',
+      });
+      return;
+    }
+
+    await client.chat.postEphemeral({
+      channel: channelId,
+      user: shortcut.user.id,
+      text: '💬 Want to reply to this thread with a translated message?',
+      blocks: [
+        {
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: '💬 *Want to reply to this thread with a translated message?*\nOnly you can see this.',
+          },
+        },
+        {
+          type: 'actions',
+          elements: [
+            {
+              type: 'button',
+              text: { type: 'plain_text', text: 'Reply with translated message', emoji: true },
+              style: 'primary',
+              action_id: 'open_translate_modal',
+              value: JSON.stringify({ channelId, threadTs, messageTs }),
+            },
+          ],
+        },
+      ],
+    });
+  } catch (err) {
+    logger.error('Error in translate_reply shortcut:', err);
+  }
+});
+
+// Step 2: Button click → open modal with text input
+app.action('open_translate_modal', async ({ body, ack, client, logger }) => {
+  await ack();
+  try {
+    const { channelId, threadTs } = JSON.parse(body.actions[0].value);
+
+    await client.views.open({
+      trigger_id: body.trigger_id,
+      view: {
+        type: 'modal',
+        callback_id: 'translate_reply_modal',
+        private_metadata: JSON.stringify({ channelId, threadTs }),
+        title: { type: 'plain_text', text: 'Translate & Reply' },
+        submit: { type: 'plain_text', text: 'Translate & Send' },
+        close: { type: 'plain_text', text: 'Cancel' },
+        blocks: [
+          {
+            type: 'input',
+            block_id: 'message_block',
+            label: { type: 'plain_text', text: 'Your message' },
+            element: {
+              type: 'plain_text_input',
+              action_id: 'message_input',
+              multiline: true,
+              placeholder: { type: 'plain_text', text: 'Type your message here…' },
+            },
+          },
+          {
+            type: 'input',
+            block_id: 'lang_block',
+            label: { type: 'plain_text', text: 'Target language (optional)' },
+            hint: { type: 'plain_text', text: 'e.g. ja, en, vi — leave blank to auto-detect from channel' },
+            optional: true,
+            element: {
+              type: 'plain_text_input',
+              action_id: 'lang_input',
+              placeholder: { type: 'plain_text', text: 'ja' },
+            },
+          },
+        ],
+      },
+    });
+  } catch (err) {
+    logger.error('Error opening translate modal:', err);
+  }
+});
+
+// Step 3: Modal submit → translate → post to thread
+app.view('translate_reply_modal', async ({ view, ack, client, body, logger }) => {
+  await ack();
+  try {
+    const { channelId, threadTs } = JSON.parse(view.private_metadata);
+    const messageText = view.state.values.message_block.message_input.value;
+    const langInput = view.state.values.lang_block.lang_input.value?.trim();
+
+    let targetCode = langInput ? getLangCode(langInput) : null;
+
+    // Auto-detect from recent channel messages if no lang provided
+    if (!targetCode) {
+      targetCode = await detectChannelLanguage(client, channelId);
+    }
+
+    if (!targetCode) {
+      targetCode = getLangCode(DEFAULT_OUTGOING_LANG);
+    }
+
+    const translated = await translate(messageText, targetCode);
+
+    const profileRes = await client.users.info({ user: body.user.id });
+    const profile = profileRes.user?.profile;
+    const displayName = profile?.display_name || profile?.real_name || 'Unknown';
+    const avatarUrl = profile?.image_72;
+
+    await client.chat.postMessage({
+      channel: channelId,
+      thread_ts: threadTs,
+      text: translated,
+      username: displayName,
+      icon_url: avatarUrl,
+    });
+  } catch (err) {
+    logger.error('Error in translate_reply_modal submit:', err);
+  }
+});
+
 // ── Start ──────────────────────────────────────────────────────────────────
 (async () => {
   await seedFromEnv();
