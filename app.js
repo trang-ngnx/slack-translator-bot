@@ -21,6 +21,32 @@ const KEYS = {
   userTokens:             'user_tokens',   // hash: userId → user OAuth token
 };
 
+// Per-user per-channel translation viewers (Redis set per key)
+function viewersKey(userId, channelId) { return `viewers:${userId}:${channelId}`; }
+async function viewersAdd(userId, channelId, viewerIds)  { await redis.sadd(viewersKey(userId, channelId), ...viewerIds); }
+async function viewersRemove(userId, channelId, viewerId){ await redis.srem(viewersKey(userId, channelId), viewerId); }
+async function viewersList(userId, channelId)            { return redis.smembers(viewersKey(userId, channelId)); }
+async function viewersClear(userId, channelId)           { await redis.del(viewersKey(userId, channelId)); }
+
+// Send ephemeral notifications to all viewers of a translation in a channel
+async function notifyViewers(client, { senderId, channelId, threadTs, senderName, originalText, translatedBlocks, targetLabel }) {
+  const ids = await viewersList(senderId, channelId);
+  if (!ids.length) return;
+  for (const viewerId of ids) {
+    await client.chat.postEphemeral({
+      channel: channelId,
+      user: viewerId,
+      ...(threadTs ? { thread_ts: threadTs } : {}),
+      text: `👁 *[${senderName} → ${targetLabel}]* ${originalText}`,
+      blocks: [
+        { type: 'section', text: { type: 'mrkdwn', text: `👁 *${senderName}* sent a translated message (→ ${targetLabel}):\n*Original:* ${originalText}` } },
+        { type: 'divider' },
+        { type: 'rich_text', elements: translatedBlocks },
+      ],
+    });
+  }
+}
+
 async function setAdd(key, value)    { await redis.sadd(key, value); }
 async function setRemove(key, value) { await redis.srem(key, value); }
 async function setHas(key, value)    { return (await redis.sismember(key, value)) === 1; }
@@ -414,7 +440,7 @@ app.event('message', async ({ event, client, logger }) => {
 app.command('/ed', async ({ command, ack, client, logger }) => {
   await ack();
 
-  const USAGE = 'Available commands:\n• `/ed join` — subscribe to auto-translations\n• `/ed leave` — unsubscribe\n• `/ed lang [language]` — set your preferred incoming translation language\n• `/ed watch` — monitor this channel\n• `/ed unwatch` — stop monitoring this channel\n• `/ed dm-watch @user` — monitor DMs from a user sent to the bot\n• `/ed dm-unwatch @user` — stop monitoring\n• `/ed send [language]` — set default outgoing language for this channel\n• `/ed send [message]` — translate and post to channel\n• `/ed trans [link or text]` — translate privately\n• `/ed login` — authorize so your messages send without the "App" badge\n• `/ed logout` — remove your authorization';
+  const USAGE = 'Available commands:\n• `/ed join` — subscribe to auto-translations\n• `/ed leave` — unsubscribe\n• `/ed lang [language]` — set your preferred incoming translation language\n• `/ed watch` — monitor this channel\n• `/ed unwatch` — stop monitoring this channel\n• `/ed dm-watch @user` — monitor DMs from a user sent to the bot\n• `/ed dm-unwatch @user` — stop monitoring\n• `/ed send [language]` — set default outgoing language for this channel\n• `/ed send [message]` — translate and post to channel\n• `/ed trans [link or text]` — translate privately\n• `/ed viewers add @alice @bob` — let colleagues privately see your translations here\n• `/ed viewers remove @alice` | `list` | `clear`\n• `/ed login` — authorize so your messages send without the "App" badge\n• `/ed logout` — remove your authorization';
 
   const isDM = command.channel_id.startsWith('D');
   async function reply(text) {
@@ -598,6 +624,17 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
           icon_url: avatarUrl,
           text: `✅ *Sent (→ ${targetLabel})*\n*Original:* ${messageText}`,
         });
+
+        // Notify viewers
+        await notifyViewers(client, {
+          senderId: command.user_id,
+          channelId: command.channel_id,
+          threadTs: command.thread_ts || null,
+          senderName: displayName,
+          originalText: messageText,
+          translatedBlocks: translatedRichText.elements,
+          targetLabel,
+        });
       }
 
     } else if (subcommand === 'trans') {
@@ -623,6 +660,39 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
 
       const translated = await translate(textToTranslate, 'English');
       await reply(`🌐 *Translation (only you see this):*\n${translated}`);
+
+    // ── ed viewers ─────────────────────────────────────────────────────────
+    } else if (subcommand === 'viewers') {
+      if (isDM) { await reply('❌ Run `/ed viewers` inside a channel.'); return; }
+      const [action, ...rest] = args.split(/\s+/);
+      const vKey = viewersKey(command.user_id, command.channel_id);
+
+      if (action === 'add') {
+        const ids = rest.join(' ').match(/<@([A-Z0-9]+)(?:\|[^>]+)?>/g);
+        if (!ids?.length) { await reply('❌ Usage: `/ed viewers add @alice @bob`'); return; }
+        const parsed = ids.map(m => m.match(/<@([A-Z0-9]+)/)[1]);
+        await viewersAdd(command.user_id, command.channel_id, parsed);
+        const names = parsed.map(id => `<@${id}>`).join(', ');
+        await reply(`✅ Added ${names} as translation viewer(s) in this channel.\nThey will privately see your outgoing translations here.`);
+
+      } else if (action === 'remove') {
+        const match = rest.join(' ').match(/<@([A-Z0-9]+)(?:\|[^>]+)?>/);
+        if (!match) { await reply('❌ Usage: `/ed viewers remove @alice`'); return; }
+        await viewersRemove(command.user_id, command.channel_id, match[1]);
+        await reply(`✅ Removed <@${match[1]}> from your viewers in this channel.`);
+
+      } else if (action === 'list') {
+        const ids = await viewersList(command.user_id, command.channel_id);
+        if (!ids.length) { await reply('No viewers set for this channel.'); return; }
+        await reply(`👥 *Your translation viewers in this channel:*\n${ids.map(id => `• <@${id}>`).join('\n')}`);
+
+      } else if (action === 'clear') {
+        await viewersClear(command.user_id, command.channel_id);
+        await reply('✅ Cleared all viewers for this channel.');
+
+      } else {
+        await reply('Usage:\n• `/ed viewers add @alice @bob`\n• `/ed viewers remove @alice`\n• `/ed viewers list`\n• `/ed viewers clear`');
+      }
 
     } else {
       await reply(`❌ Unknown command \`${subcommand}\`.\n${USAGE}`);
@@ -752,7 +822,7 @@ app.view('translate_reply_modal', async ({ view, ack, client, body, logger }) =>
       blocks: [{ type: 'rich_text', elements: translatedRichText.elements }],
     });
 
-    // Confirmation appears right below the sent message, shown as the user
+    // Confirmation appears in thread, shown as the user
     const originalPlain = richTextToPlain(richTextValue);
     await client.chat.postEphemeral({
       channel: channelId,
@@ -761,6 +831,17 @@ app.view('translate_reply_modal', async ({ view, ack, client, body, logger }) =>
       username: displayName,
       icon_url: avatarUrl,
       text: `✅ *Sent (→ ${targetCode})*\n*Original:* ${originalPlain}`,
+    });
+
+    // Notify viewers
+    await notifyViewers(client, {
+      senderId: body.user.id,
+      channelId,
+      threadTs,
+      senderName: displayName,
+      originalText: originalPlain,
+      translatedBlocks: translatedRichText.elements,
+      targetLabel: targetCode,
     });
   } catch (err) {
     logger.error('Error in translate_reply_modal submit:', err);
