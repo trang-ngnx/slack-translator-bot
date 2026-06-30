@@ -10,7 +10,6 @@ const DEFAULT_OUTGOING_LANG = process.env.OUTGOING_LANGUAGE || 'English';
 // ── Redis persistent store ─────────────────────────────────────────────────
 const redis = new Redis(process.env.REDIS_URL);
 
-// Keys used in Redis
 const KEYS = {
   subscribers:            'subscribers',
   monitoredChannels:      'monitored_channels',
@@ -19,13 +18,11 @@ const KEYS = {
   userChannelOutgoingLang:'user_channel_outgoing_lang',
 };
 
-// Set helpers (stored as Redis sets)
 async function setAdd(key, value)    { await redis.sadd(key, value); }
 async function setRemove(key, value) { await redis.srem(key, value); }
 async function setHas(key, value)    { return (await redis.sismember(key, value)) === 1; }
 async function setAll(key)           { return new Set(await redis.smembers(key)); }
 
-// Seed a Redis set from comma-separated env var if the set is empty
 async function seedSet(key, envValue) {
   const count = await redis.scard(key);
   if (count === 0 && envValue) {
@@ -34,23 +31,21 @@ async function seedSet(key, envValue) {
   }
 }
 
-// Hash helpers (stored as Redis hashes)
 async function hashSet(key, field, value) { await redis.hset(key, field, value); }
 async function hashGet(key, field)        { return redis.hget(key, field); }
 async function hashDel(key, field)        { await redis.hdel(key, field); }
 
-// Seed initial data from env vars (only runs when Redis keys are empty)
 async function seedFromEnv() {
   await seedSet(KEYS.subscribers,       process.env.SUBSCRIBER_USER_IDS);
   await seedSet(KEYS.monitoredChannels, process.env.MONITORED_CHANNEL_IDS);
   await seedSet(KEYS.monitoredDmUsers,  process.env.MONITORED_DM_USER_IDS);
 }
 
-// ── Clients ────────────────────────────────────────────────────────────────
+// ── Slack app ──────────────────────────────────────────────────────────────
 const app = new App({
   token: process.env.SLACK_BOT_TOKEN,
   signingSecret: process.env.SLACK_SIGNING_SECRET,
-  appToken: process.env.SLACK_APP_TOKEN, // only needed for Socket Mode
+  appToken: process.env.SLACK_APP_TOKEN,
   socketMode: process.env.SOCKET_MODE === 'true',
 });
 
@@ -61,19 +56,17 @@ const LANG_CODES = {
   thai: 'th', italian: 'it', portuguese: 'pt', dutch: 'nl',
 };
 
-// Accepts both full names ("Japanese") and ISO codes ("ja")
 function getLangCode(input) {
   const lower = input.toLowerCase().trim();
   return LANG_CODES[lower] || lower;
 }
 
-// Protect Slack entities from being mangled by translation (ported from joycetran002/slack-translator)
-// Replaces mentions, links, emoji, and code blocks with ‹0›, ‹1›... placeholders
+// Protect Slack entities from translation mangling
 const PROTECT_PATTERNS = [
-  /```[\s\S]*?```/g,   // code blocks
-  /`[^`]+`/g,          // inline code
-  /<[^\s][^>]*>/g,     // mentions (<@U...>), channels (<#C...>), links (<https://...>)
-  /:[a-z0-9_+\-']+:/g, // emoji shortcodes :thumbsup:
+  /```[\s\S]*?```/g,
+  /`[^`]+`/g,
+  /<[^\s][^>]*>/g,
+  /:[a-z0-9_+\-']+:/g,
 ];
 
 function protect(text) {
@@ -82,7 +75,7 @@ function protect(text) {
   for (const pattern of PROTECT_PATTERNS) {
     result = result.replace(pattern, (match) => {
       stash.push(match);
-      return `‹${stash.length - 1}›`; // ‹N›
+      return `‹${stash.length - 1}›`;
     });
   }
   return { masked: result, stash };
@@ -106,32 +99,131 @@ function googleTranslateRaw(text, targetCode) {
   });
 }
 
-async function translate(text, targetLanguage) {
-  const targetCode = getLangCode(targetLanguage);
+async function translateSegment(text, targetCode) {
   const { masked, stash } = protect(text);
   const json = await googleTranslateRaw(masked, targetCode);
-  const translatedMasked = json[0].map(chunk => chunk[0]).join('');
-  return restore(translatedMasked, stash);
+  return restore(json[0].map(c => c[0]).join(''), stash);
 }
 
-// Fetch recent non-English messages from a channel and detect their language.
-// Returns an ISO language code (e.g. 'ja', 'vi') or null if undetermined.
+// Translate mrkdwn text while preserving bold/italic/strikethrough markers.
+// Each formatted span's inner text is translated separately so markers survive.
+async function translate(text, targetLanguage) {
+  const targetCode = getLangCode(targetLanguage);
+  // Match *bold*, _italic_, ~strike~ spans
+  const FORMAT_RE = /(\*[^*\n]+\*|_[^_\n]+_|~[^~\n]+~)/g;
+
+  const segments = [];
+  let last = 0;
+  let m;
+  while ((m = FORMAT_RE.exec(text)) !== null) {
+    if (m.index > last) segments.push({ fmt: null, text: text.slice(last, m.index) });
+    const marker = m[0][0];
+    segments.push({ fmt: marker, text: m[0].slice(1, -1) });
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) segments.push({ fmt: null, text: text.slice(last) });
+
+  const parts = await Promise.all(segments.map(async seg => {
+    if (!seg.text.trim()) return seg.text;
+    const translated = await translateSegment(seg.text, targetCode);
+    return seg.fmt ? `${seg.fmt}${translated}${seg.fmt}` : translated;
+  }));
+
+  return parts.join('');
+}
+
 async function detectChannelLanguage(client, channelId) {
   const result = await client.conversations.history({ channel: channelId, limit: 20 });
   const messages = (result.messages || []).filter(m => !m.bot_id && !m.subtype && m.text?.trim());
-
   for (const msg of messages) {
     const json = await googleTranslateRaw(msg.text, 'en');
-    const detectedLang = json[2]; // e.g. 'ja', 'vi', 'en'
+    const detectedLang = json[2];
     if (detectedLang && detectedLang !== 'en') return detectedLang;
   }
   return null;
 }
 
+// ── Rich text helpers ──────────────────────────────────────────────────────
+// Convert a Slack rich_text_input value to mrkdwn string
+function richTextSectionToMrkdwn(elements) {
+  let out = '';
+  for (const el of elements || []) {
+    if (el.type === 'text') {
+      let t = el.text;
+      if (el.style?.code)   t = `\`${t}\``;
+      else {
+        if (el.style?.bold)   t = `*${t}*`;
+        if (el.style?.italic) t = `_${t}_`;
+        if (el.style?.strike) t = `~${t}~`;
+      }
+      out += t;
+    } else if (el.type === 'link')    { out += `<${el.url}|${el.text || el.url}>`; }
+    else if (el.type === 'user')      { out += `<@${el.user_id}>`; }
+    else if (el.type === 'channel')   { out += `<#${el.channel_id}>`; }
+    else if (el.type === 'emoji')     { out += `:${el.name}:`; }
+  }
+  return out;
+}
+
+function richTextToMrkdwn(richText) {
+  if (!richText?.elements) return '';
+  const lines = [];
+  for (const block of richText.elements) {
+    if (block.type === 'rich_text_section') {
+      lines.push(richTextSectionToMrkdwn(block.elements));
+    } else if (block.type === 'rich_text_preformatted') {
+      const t = block.elements?.map(e => e.text || '').join('');
+      lines.push('```' + t + '```');
+    } else if (block.type === 'rich_text_quote') {
+      lines.push('>' + richTextSectionToMrkdwn(block.elements));
+    } else if (block.type === 'rich_text_list') {
+      for (const item of block.elements || []) {
+        lines.push('• ' + richTextSectionToMrkdwn(item.elements));
+      }
+    }
+  }
+  return lines.join('\n');
+}
+
+// ── Shared modal definition ────────────────────────────────────────────────
+function translateReplyModalView(channelId, threadTs) {
+  return {
+    type: 'modal',
+    callback_id: 'translate_reply_modal',
+    private_metadata: JSON.stringify({ channelId, threadTs }),
+    title: { type: 'plain_text', text: 'Translate & Reply' },
+    submit: { type: 'plain_text', text: 'Translate & Send' },
+    close: { type: 'plain_text', text: 'Cancel' },
+    blocks: [
+      {
+        type: 'input',
+        block_id: 'message_block',
+        label: { type: 'plain_text', text: 'Your message' },
+        element: {
+          type: 'rich_text_input',
+          action_id: 'message_input',
+          placeholder: { type: 'plain_text', text: 'Type your message here…' },
+        },
+      },
+      {
+        type: 'input',
+        block_id: 'lang_block',
+        label: { type: 'plain_text', text: 'Target language (optional)' },
+        hint: { type: 'plain_text', text: 'e.g. ja, en, vi — leave blank to auto-detect from channel' },
+        optional: true,
+        element: {
+          type: 'plain_text_input',
+          action_id: 'lang_input',
+          placeholder: { type: 'plain_text', text: 'ja' },
+        },
+      },
+    ],
+  };
+}
+
 // ── Incoming: auto-translate messages in monitored channels ────────────────
 app.event('message', async ({ event, client, logger }) => {
   try {
-    // Skip bot messages, edits, deletes
     if (event.subtype || event.bot_id) return;
     if (!event.text?.trim()) return;
 
@@ -141,11 +233,9 @@ app.event('message', async ({ event, client, logger }) => {
     if (!isMonitoredChannel && !isMonitoredDM) return;
 
     const allSubscribers = await setAll(KEYS.subscribers);
-
     const isThreadReply = !!event.thread_ts && event.thread_ts !== event.ts;
     const ctx = JSON.stringify({ channelId: event.channel, threadTs: event.thread_ts || event.ts, messageTs: event.ts });
 
-    // Send translation to every subscribed user except the sender
     for (const userId of allSubscribers) {
       if (userId === event.user) continue;
       const targetLang = await hashGet(KEYS.userIncomingLang, userId) || 'en';
@@ -157,7 +247,7 @@ app.event('message', async ({ event, client, logger }) => {
           text: `🌐 *[Translation from DM]*\n${translated}`,
         });
       } else if (isThreadReply) {
-        // For thread messages: show action buttons instead of auto-translating
+        // Thread messages: show action buttons instead of auto-translating
         await client.chat.postEphemeral({
           channel: event.channel,
           user: userId,
@@ -189,7 +279,6 @@ app.event('message', async ({ event, client, logger }) => {
           ],
         });
       } else {
-        // For non-thread channel messages: auto-translate as before
         const translated = await translate(event.text, targetLang);
         await client.chat.postEphemeral({
           channel: event.channel,
@@ -204,16 +293,11 @@ app.event('message', async ({ event, client, logger }) => {
 });
 
 // ── /ed — single entry point for all commands ─────────────────────────────
-// Usage:
-//   /ed send Hello everyone, I'll join in 5 minutes
-//   /ed send Japanese: Hello   ← force a specific target language
-//   /ed trans https://...slack.com/archives/C.../p...
 app.command('/ed', async ({ command, ack, client, logger }) => {
   await ack();
 
   const USAGE = 'Available commands:\n• `/ed join` — subscribe to auto-translations\n• `/ed leave` — unsubscribe\n• `/ed lang [language]` — set your preferred incoming translation language (e.g. Vietnamese)\n• `/ed watch` — monitor this channel\n• `/ed unwatch` — stop monitoring this channel\n• `/ed dm-watch @user` — monitor DMs from a user sent to the bot\n• `/ed dm-unwatch @user` — stop monitoring\n• `/ed send [language]` — set default outgoing language for this channel (e.g. Japanese)\n• `/ed send [message]` — translate and post to channel\n• `/ed trans [link or text]` — translate privately';
 
-  // Ephemeral messages don't work in DMs — use a bot DM to the user instead
   const isDM = command.channel_id.startsWith('D');
   async function reply(text) {
     if (isDM) {
@@ -227,7 +311,6 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
     const [subcommand, ...rest] = (command.text || '').trim().split(/\s+/);
     const args = rest.join(' ').trim();
 
-    // ── ed join ────────────────────────────────────────────────────────────
     if (subcommand === 'join') {
       if (await setHas(KEYS.subscribers, command.user_id)) {
         await reply('✅ You\'re already subscribed to auto-translations.');
@@ -236,7 +319,6 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
         await reply('✅ Subscribed! You\'ll now receive translations for messages in monitored channels.');
       }
 
-    // ── ed leave ───────────────────────────────────────────────────────────
     } else if (subcommand === 'leave') {
       if (!await setHas(KEYS.subscribers, command.user_id)) {
         await reply('You\'re not currently subscribed.');
@@ -245,7 +327,6 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
         await reply('👋 Unsubscribed. You\'ll no longer receive auto-translations.');
       }
 
-    // ── ed lang ────────────────────────────────────────────────────────────
     } else if (subcommand === 'lang') {
       if (!args) {
         const current = await hashGet(KEYS.userIncomingLang, command.user_id) || 'en';
@@ -256,12 +337,8 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
       await hashSet(KEYS.userIncomingLang, command.user_id, langCode);
       await reply(`✅ Done! Auto-translations will now be delivered to you in *${langCode}*.`);
 
-    // ── ed watch ───────────────────────────────────────────────────────────
     } else if (subcommand === 'watch') {
-      if (isDM) {
-        await reply('❌ Run `/ed watch` inside a channel, not a DM.');
-        return;
-      }
+      if (isDM) { await reply('❌ Run `/ed watch` inside a channel, not a DM.'); return; }
       if (await setHas(KEYS.monitoredChannels, command.channel_id)) {
         await reply('✅ This channel is already being monitored.');
       } else {
@@ -269,12 +346,8 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
         await reply('✅ This channel is now monitored — subscribers will receive auto-translations for new messages here.');
       }
 
-    // ── ed unwatch ─────────────────────────────────────────────────────────
     } else if (subcommand === 'unwatch') {
-      if (isDM) {
-        await reply('❌ Run `/ed unwatch` inside a channel, not a DM.');
-        return;
-      }
+      if (isDM) { await reply('❌ Run `/ed unwatch` inside a channel, not a DM.'); return; }
       if (!await setHas(KEYS.monitoredChannels, command.channel_id)) {
         await reply('This channel is not currently being monitored.');
       } else {
@@ -282,7 +355,6 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
         await reply('✅ This channel has been removed from monitoring.');
       }
 
-    // ── ed dm-watch ────────────────────────────────────────────────────────
     } else if (subcommand === 'dm-watch') {
       const userMatch = args.match(/<@([A-Z0-9]+)(?:\|[^>]+)?>/);
       if (!userMatch) {
@@ -297,13 +369,9 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
         await reply(`✅ Done. When <@${targetUserId}> sends a message to the bot, it will be translated for all subscribers.\n⚠️ Reminder: the bot cannot read DMs between you and them directly — only messages they send to the bot.`);
       }
 
-    // ── ed dm-unwatch ──────────────────────────────────────────────────────
     } else if (subcommand === 'dm-unwatch') {
       const userMatch = args.match(/<@([A-Z0-9]+)(?:\|[^>]+)?>/);
-      if (!userMatch) {
-        await reply('❌ Usage: `/ed dm-unwatch @username`');
-        return;
-      }
+      if (!userMatch) { await reply('❌ Usage: `/ed dm-unwatch @username`'); return; }
       const targetUserId = userMatch[1];
       if (!await setHas(KEYS.monitoredDmUsers, targetUserId)) {
         await reply(`<@${targetUserId}> is not currently being monitored.`);
@@ -312,14 +380,12 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
         await reply(`✅ Stopped monitoring DMs from <@${targetUserId}>.`);
       }
 
-    // ── ed send ────────────────────────────────────────────────────────────
     } else if (subcommand === 'send') {
       if (!args) {
         await reply('❌ Usage:\n• `/ed send [language]` — set default outgoing language for this channel (e.g. `/ed send Japanese`)\n• `/ed send [message]` — translate and post');
         return;
       }
 
-      // If args is a single word that's a known language name or a 2-5 char ISO code, treat as setting default language
       const isLangOnly = args.split(' ').length === 1 &&
         (Object.keys(LANG_CODES).includes(args.toLowerCase()) || /^[a-zA-Z]{2,5}$/.test(args));
 
@@ -335,7 +401,6 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
       let targetCode = null;
       let targetLabel = null;
 
-      // Allow inline one-time language override: "/ed send Japanese: Hello"
       const langOverrideMatch = args.match(/^([A-Za-z\s]{2,20}):\s+([\s\S]+)$/);
       if (langOverrideMatch) {
         targetLabel = langOverrideMatch[1].trim();
@@ -343,18 +408,15 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
         messageText = langOverrideMatch[2].trim();
       }
 
-      // Use user's saved outgoing language for this channel
       if (!targetCode) {
         const key = `${command.user_id}:${command.channel_id}`;
         targetCode = await hashGet(KEYS.userChannelOutgoingLang, key) || null;
       }
 
-      // Auto-detect from recent channel messages (skip in DMs — bot has no access)
       if (!targetCode && !isDM) {
         targetCode = await detectChannelLanguage(client, command.channel_id);
       }
 
-      // Final fallback
       if (!targetCode) {
         targetLabel = CHANNEL_LANGUAGES[command.channel_id] || DEFAULT_OUTGOING_LANG;
         targetCode = getLangCode(targetLabel);
@@ -362,14 +424,11 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
 
       targetLabel = targetLabel || targetCode;
 
-      const json = await googleTranslateRaw(messageText, targetCode);
-      const translated = json[0].map(chunk => chunk[0]).join('');
+      const translated = await translate(messageText, targetCode);
 
       if (isDM) {
-        // Can't post into a user-to-user DM — show translation for manual copy-paste
         await reply(`📋 *Translation (→ ${targetLabel}):*\n\n${translated}`);
       } else {
-        // Fetch sender's profile to post with their name and avatar
         const profileRes = await client.users.info({ user: command.user_id });
         const profile = profileRes.user?.profile;
         const displayName = profile?.display_name || profile?.real_name || 'Unknown';
@@ -386,7 +445,6 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
         await reply(`✅ *Sent (→ ${targetLabel})*\n*Original:* ${messageText}\n*Translated:* ${translated}`);
       }
 
-    // ── ed trans ───────────────────────────────────────────────────────────
     } else if (subcommand === 'trans') {
       if (!args) {
         await reply('❌ Usage:\n• `/ed trans [Slack message link]` — translate a message by link\n• `/ed trans [any text]` — translate text directly');
@@ -395,19 +453,11 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
 
       let textToTranslate = args;
 
-      // If it looks like a Slack message link, fetch the message text first
       const match = args.match(/\/archives\/([A-Z0-9]+)\/p(\d{10})(\d{6})/);
       if (match) {
         const channelId = match[1];
         const ts = `${match[2]}.${match[3]}`;
-
-        const result = await client.conversations.history({
-          channel: channelId,
-          latest: ts,
-          inclusive: true,
-          limit: 1,
-        });
-
+        const result = await client.conversations.history({ channel: channelId, latest: ts, inclusive: true, limit: 1 });
         const message = result.messages?.[0];
         if (!message?.text) {
           await reply('❌ Could not fetch that message. Make sure the bot is invited to that channel.\n\nTip: for DM messages, copy the text directly and use `/ed trans [paste text]` instead.');
@@ -419,7 +469,6 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
       const translated = await translate(textToTranslate, 'English');
       await reply(`🌐 *Translation (only you see this):*\n${translated}`);
 
-    // ── unknown subcommand ─────────────────────────────────────────────────
     } else {
       await reply(`❌ Unknown command \`${subcommand}\`.\n${USAGE}`);
     }
@@ -431,7 +480,7 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
 
 // ── Thread button: "Translate this message" ───────────────────────────────
 app.action('thread_translate_msg', async ({ body, ack, client, logger }) => {
-  await ack(); // ack only — no respond(), so the button ephemeral stays visible
+  await ack();
   try {
     const { channelId, threadTs, messageTs } = JSON.parse(body.actions[0].value);
     const userId = body.user.id;
@@ -459,53 +508,16 @@ app.action('thread_translate_msg', async ({ body, ack, client, logger }) => {
 
 // ── Thread button: "Reply with translation" ────────────────────────────────
 app.action('thread_open_reply_modal', async ({ body, ack, client, logger }) => {
-  await ack(); // ack only — no respond(), so the button ephemeral stays visible
+  await ack();
   try {
     const { channelId, threadTs } = JSON.parse(body.actions[0].value);
-
-    await client.views.open({
-      trigger_id: body.trigger_id,
-      view: {
-        type: 'modal',
-        callback_id: 'translate_reply_modal',
-        private_metadata: JSON.stringify({ channelId, threadTs }),
-        title: { type: 'plain_text', text: 'Translate & Reply' },
-        submit: { type: 'plain_text', text: 'Translate & Send' },
-        close: { type: 'plain_text', text: 'Cancel' },
-        blocks: [
-          {
-            type: 'input',
-            block_id: 'message_block',
-            label: { type: 'plain_text', text: 'Your message' },
-            element: {
-              type: 'plain_text_input',
-              action_id: 'message_input',
-              multiline: true,
-              placeholder: { type: 'plain_text', text: 'Type your message here…' },
-            },
-          },
-          {
-            type: 'input',
-            block_id: 'lang_block',
-            label: { type: 'plain_text', text: 'Target language (optional)' },
-            hint: { type: 'plain_text', text: 'e.g. ja, en, vi — leave blank to auto-detect from channel' },
-            optional: true,
-            element: {
-              type: 'plain_text_input',
-              action_id: 'lang_input',
-              placeholder: { type: 'plain_text', text: 'ja' },
-            },
-          },
-        ],
-      },
-    });
+    await client.views.open({ trigger_id: body.trigger_id, view: translateReplyModalView(channelId, threadTs) });
   } catch (err) {
     logger.error('Error in thread_open_reply_modal:', err);
   }
 });
 
 // ── Message shortcut: "Translate this message" ────────────────────────────
-// Right-click a message → translate it → show result only to you
 app.shortcut('translate_message', async ({ shortcut, ack, client, logger }) => {
   await ack();
   try {
@@ -534,72 +546,33 @@ app.shortcut('translate_message', async ({ shortcut, ack, client, logger }) => {
 });
 
 // ── Message shortcut: "Translate & Reply" ─────────────────────────────────
-// Right-click a message → shortcut fires → modal opens immediately
 app.shortcut('translate_reply', async ({ shortcut, ack, client, logger }) => {
   await ack();
   try {
     const channelId = shortcut.channel?.id;
     const threadTs = shortcut.message?.thread_ts || shortcut.message?.ts;
-
-    await client.views.open({
-      trigger_id: shortcut.trigger_id,
-      view: {
-        type: 'modal',
-        callback_id: 'translate_reply_modal',
-        private_metadata: JSON.stringify({ channelId, threadTs }),
-        title: { type: 'plain_text', text: 'Translate & Reply' },
-        submit: { type: 'plain_text', text: 'Translate & Send' },
-        close: { type: 'plain_text', text: 'Cancel' },
-        blocks: [
-          {
-            type: 'input',
-            block_id: 'message_block',
-            label: { type: 'plain_text', text: 'Your message' },
-            element: {
-              type: 'plain_text_input',
-              action_id: 'message_input',
-              multiline: true,
-              placeholder: { type: 'plain_text', text: 'Type your message here…' },
-            },
-          },
-          {
-            type: 'input',
-            block_id: 'lang_block',
-            label: { type: 'plain_text', text: 'Target language (optional)' },
-            hint: { type: 'plain_text', text: 'e.g. ja, en, vi — leave blank to auto-detect from channel' },
-            optional: true,
-            element: {
-              type: 'plain_text_input',
-              action_id: 'lang_input',
-              placeholder: { type: 'plain_text', text: 'ja' },
-            },
-          },
-        ],
-      },
-    });
+    await client.views.open({ trigger_id: shortcut.trigger_id, view: translateReplyModalView(channelId, threadTs) });
   } catch (err) {
     logger.error('Error in translate_reply shortcut:', err);
   }
 });
 
-// Step 3: Modal submit → translate → post to thread
+// ── Modal submit: translate & post to thread ───────────────────────────────
 app.view('translate_reply_modal', async ({ view, ack, client, body, logger }) => {
   await ack();
   try {
     const { channelId, threadTs } = JSON.parse(view.private_metadata);
-    const messageText = view.state.values.message_block.message_input.value;
     const langInput = view.state.values.lang_block.lang_input.value?.trim();
 
+    // Read rich text input and convert to mrkdwn
+    const richTextValue = view.state.values.message_block.message_input.rich_text_value;
+    const messageText = richTextToMrkdwn(richTextValue);
+
+    if (!messageText.trim()) return;
+
     let targetCode = langInput ? getLangCode(langInput) : null;
-
-    // Auto-detect from recent channel messages if no lang provided
-    if (!targetCode) {
-      targetCode = await detectChannelLanguage(client, channelId);
-    }
-
-    if (!targetCode) {
-      targetCode = getLangCode(DEFAULT_OUTGOING_LANG);
-    }
+    if (!targetCode) targetCode = await detectChannelLanguage(client, channelId);
+    if (!targetCode) targetCode = getLangCode(DEFAULT_OUTGOING_LANG);
 
     const translated = await translate(messageText, targetCode);
 
