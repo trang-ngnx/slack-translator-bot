@@ -484,7 +484,7 @@ app.event('message', async ({ event, client, logger }) => {
 });
 
 // ── /ed — single entry point for all commands ─────────────────────────────
-app.command('/ed', async ({ command, ack, client, logger }) => {
+app.command('/ed', async ({ command, ack, respond, client, logger }) => {
   await ack();
 
   const USAGE = 'Available commands:\n• `/ed join` — subscribe to auto-translations\n• `/ed leave` — unsubscribe\n• `/ed lang [language]` — set your preferred incoming translation language\n• `/ed watch` — monitor this channel\n• `/ed unwatch` — stop monitoring this channel\n• `/ed dm-watch @user` — monitor DMs from a user sent to the bot\n• `/ed dm-unwatch @user` — stop monitoring\n• `/ed send [language]` — set default outgoing language for this channel\n• `/ed send [message]` — translate and post to channel\n• `/ed trans [link or text]` — translate privately\n• `/ed recap [N]` — show last N translated messages here (default 10; works in DMs, channels, and threads)\n• `/ed recap [message link]` — show the full translated thread for a specific message (paste a Slack message link)\n• `/ed viewers add @alice @bob` — let colleagues privately see your translations here\n• `/ed viewers remove @alice` | `list` | `clear`\n• `/ed login` — authorize so your messages send without the "App" badge\n• `/ed logout` — remove your authorization';
@@ -765,7 +765,7 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
             .slice(-count);
           contextLabel = 'linked thread';
         } catch (err) {
-          await reply('❌ Could not fetch that thread. Make sure the bot is in that channel.\n\nTip: if you linked to a thread reply, try sharing the parent message link instead.');
+          await respond({ response_type: 'ephemeral', text: '❌ Could not fetch that thread. Make sure the bot is in that channel.\n\nTip: if you linked to a thread reply, try sharing the parent message link instead.' });
           return;
         }
       } else if (command.thread_ts) {
@@ -793,13 +793,13 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
       }
 
       if (!rawMessages.length) {
-        await reply('❌ No messages found.');
+        await respond({ response_type: 'ephemeral', text: '❌ No messages found.' });
         return;
       }
 
       // Cache user display names to avoid duplicate API calls
       const nameCache = {};
-      async function resolveDisplayName(userId) {
+      const resolveDisplayName = async (userId) => {
         if (nameCache[userId]) return nameCache[userId];
         try {
           const info = await client.users.info({ user: userId });
@@ -810,7 +810,7 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
           nameCache[userId] = 'Unknown';
           return 'Unknown';
         }
-      }
+      };
 
       const lines = [];
       for (const msg of rawMessages) {
@@ -835,11 +835,11 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
       }
 
       if (!lines.length) {
-        await reply('❌ No readable messages found.');
+        await respond({ response_type: 'ephemeral', text: '❌ No readable messages found.' });
         return;
       }
 
-      await reply(`📋 *Last ${lines.length} messages in this ${contextLabel} (→ ${targetCode}) — only you see this:*\n\n${lines.join('\n\n─────\n')}`);
+      await respond({ response_type: 'ephemeral', text: `📋 *Last ${lines.length} messages in this ${contextLabel} (→ ${targetCode}) — only you see this:*\n\n${lines.join('\n\n─────\n')}` });
 
     // ── ed viewers ─────────────────────────────────────────────────────────
     } else if (subcommand === 'viewers') {
