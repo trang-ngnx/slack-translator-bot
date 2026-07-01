@@ -19,6 +19,7 @@ Add these scopes:
 - `im:history` — read messages in 1:1 DMs
 - `im:write` — send DM messages (bot DMs you the translation)
 - `chat:write` — post messages
+- `chat:write.customize` — show messages under the sender's name/avatar instead of the bot's
 - `commands` — register slash commands
 
 ### Install App
@@ -66,6 +67,7 @@ In your app settings → **Slash Commands** → **Create New Command**:
    - `MONITORED_DM_USER_IDS` (optional — user IDs of people whose DMs you want translated)
    - `CHANNEL_LANGUAGES` (optional — e.g. `{"C012AB3CD":"Japanese"}`)
    - `OUTGOING_LANGUAGE` (optional, default: English)
+   - `PROTECTED_TERMS` (optional — comma-separated brand/product/person names that should never be translated, e.g. `Papabubble,Ownego`)
 4. Railway auto-deploys. Go to **Settings → Networking → Generate Domain** to get your URL
 5. **Go back to Steps 2 & 3** and paste your Railway URL into Slack's Event Subscriptions and Slash Command request URLs
 

@@ -28,7 +28,7 @@ async function viewersList(userId, channelId)            { return redis.smembers
 async function viewersClear(userId, channelId)           { await redis.del(viewersKey(userId, channelId)); }
 
 // Send ephemeral notifications to all viewers of a translation in a channel
-async function notifyViewers(client, { senderId, channelId, threadTs, senderName, originalText, translatedBlocks, targetLabel }) {
+async function notifyViewers(client, { senderId, channelId, threadTs, senderName, senderAvatarUrl, originalText, translatedBlocks, targetLabel }) {
   const ids = await viewersList(senderId, channelId);
   if (!ids.length) return;
   for (const viewerId of ids) {
@@ -36,9 +36,12 @@ async function notifyViewers(client, { senderId, channelId, threadTs, senderName
       channel: channelId,
       user: viewerId,
       ...(threadTs ? { thread_ts: threadTs } : {}),
+      // Show as the sender, not the bot's app identity — easier to recognize who sent it
+      username: senderName,
+      icon_url: senderAvatarUrl,
       text: `👁 *[${senderName} → ${targetLabel}]* ${originalText}`,
       blocks: [
-        { type: 'section', text: { type: 'mrkdwn', text: `👁 *${senderName}* sent a translated message (→ ${targetLabel}):\n*Original:* ${originalText}` } },
+        { type: 'section', text: { type: 'mrkdwn', text: `👁 Sent a translated message (→ ${targetLabel}):\n*Original:* ${originalText}` } },
         { type: 'divider' },
         { type: 'rich_text', elements: translatedBlocks },
       ],
@@ -190,11 +193,23 @@ function getLangCode(input) {
   return LANG_CODES[lower] || lower;
 }
 
+function escapeRegex(str) {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// Brand names, product names, or person names that must never be translated —
+// configured via PROTECTED_TERMS (comma-separated, case-insensitive, e.g. "Papabubble,Ownego").
+const PROTECTED_TERMS = (process.env.PROTECTED_TERMS || '')
+  .split(',').map(s => s.trim()).filter(Boolean);
+
 const PROTECT_PATTERNS = [
   /```[\s\S]*?```/g,
   /`[^`]+`/g,
   /<(?:[@#!]|https?:\/\/)[^>]*>/g,  // Slack entities: <@U...>, <#C...>, <http...>, <!...>
   /:[a-z0-9_+\-']+:/g,
+  ...(PROTECTED_TERMS.length
+    ? [new RegExp(`\\b(?:${PROTECTED_TERMS.map(escapeRegex).join('|')})\\b`, 'gi')]
+    : []),
 ];
 
 function protect(text) {
@@ -967,6 +982,7 @@ app.view('translate_reply_modal', async ({ view, ack, client, body, logger }) =>
       channelId,
       threadTs: sentTs || threadTs,
       senderName: displayName,
+      senderAvatarUrl: avatarUrl,
       originalText: originalPlain,
       translatedBlocks: translatedRichText.elements,
       targetLabel: targetCode,
