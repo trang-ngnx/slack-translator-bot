@@ -35,6 +35,11 @@ Add these scopes:
 - Check **"Allow users to send Slash commands and messages from the messages tab"**
 - Without this, the DM tab with the bot shows but the message box stays disabled — no reinstall needed, just refresh Slack after saving
 
+### App Home → Enable the settings Home tab
+- In the same **Show Tabs** section, toggle on **Home Tab**
+- This powers the visual settings screen (subscribe/unsubscribe, language, watched channels, viewers) — an alternative to typing `/ed` commands
+- Requires the `member_joined_channel`-adjacent event below (`app_home_opened`) to actually render
+
 ---
 
 ## Step 2 — Configure Event Subscriptions
@@ -44,7 +49,7 @@ Add these scopes:
    - ⚠️ Must be `https://`, not `http://`
    - ⚠️ Must include `/slack/events` at the end
    - Come back to fill this after deploying in Step 4
-3. Under **Subscribe to bot events**, add: `message.channels`, `message.groups`, `message.im`, and `member_joined_channel`
+3. Under **Subscribe to bot events**, add: `message.channels`, `message.groups`, `message.im`, `member_joined_channel`, and `app_home_opened`
 4. Save changes
 
 > `member_joined_channel` powers auto-watch: any channel the bot is added to is automatically monitored, no `/ed watch` needed. `/ed watch`/`/ed unwatch` still work for manual control.
@@ -107,6 +112,9 @@ In each channel you want to monitor or use `/translate` in, type:
 
 ## Usage
 
+### Settings tab (recommended for most users)
+Open the bot's **Home** tab (click its name → Home) for a visual settings screen: subscribe/unsubscribe, pick your incoming language, and see the channels you're in that are watched — with a per-channel menu to **mute translations for yourself** (personal, doesn't affect other subscribers) or manage viewers. Everything below also works as a slash command for anyone who prefers typing.
+
 ### Subscription
 | What you want | What to do |
 |---|---|
@@ -114,12 +122,13 @@ In each channel you want to monitor or use `/translate` in, type:
 | Unsubscribe | `/ed leave` |
 
 ### Channel monitoring
-> Channels are watched automatically as soon as the bot is added to them. Use these only for manual control (e.g. to opt a channel out).
+> Channels are watched automatically as soon as the bot is added to them — this is a workspace-wide setting. `/ed watch`/`/ed unwatch` (or the Home tab) change that for everyone. To opt out personally without affecting other subscribers, use "Mute for me" in the Home tab instead.
 
 | What you want | What to do |
 |---|---|
 | Monitor this channel (run inside the channel) | `/ed watch` |
-| Stop monitoring this channel | `/ed unwatch` |
+| Stop monitoring this channel (affects all subscribers) | `/ed unwatch` |
+| Stop translations from this channel for yourself only | Home tab → channel menu → **Mute for me** |
 
 ### Translation
 | What you want | What to do |

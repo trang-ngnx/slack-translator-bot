@@ -27,6 +27,15 @@ async function viewersRemove(userId, channelId, viewerId){ await redis.srem(view
 async function viewersList(userId, channelId)            { return redis.smembers(viewersKey(userId, channelId)); }
 async function viewersClear(userId, channelId)           { await redis.del(viewersKey(userId, channelId)); }
 
+// Per-user muted channels — separate from the global monitoredChannels set.
+// Watching a channel (via auto-watch or /ed watch) is a workspace-wide setting;
+// muting is a personal "don't send me translations from this one" preference
+// that doesn't affect any other subscriber.
+function mutedChannelsKey(userId)                     { return `muted_channels:${userId}`; }
+async function isChannelMutedForUser(userId, channelId) { return (await redis.sismember(mutedChannelsKey(userId), channelId)) === 1; }
+async function muteChannelForUser(userId, channelId)    { await redis.sadd(mutedChannelsKey(userId), channelId); }
+async function unmuteChannelForUser(userId, channelId)  { await redis.srem(mutedChannelsKey(userId), channelId); }
+
 // Send ephemeral notifications to all viewers of a translation in a channel
 async function notifyViewers(client, { senderId, channelId, threadTs, senderName, senderAvatarUrl, originalText, translatedBlocks, targetLabel }) {
   const ids = await viewersList(senderId, channelId);
@@ -551,6 +560,132 @@ function translateTransResultView({ original, translated, targetCode }) {
   };
 }
 
+// ── App Home: settings tab (join / language / watched channels / viewers) ──
+function langDisplayName(code) {
+  const entry = Object.entries(LANG_CODES).find(([, c]) => c === code);
+  const name = entry ? entry[0] : code;
+  return name.charAt(0).toUpperCase() + name.slice(1);
+}
+
+function viewersModalView(channelId, currentViewerIds) {
+  const element = {
+    type: 'multi_users_select',
+    action_id: 'viewers_input',
+    placeholder: { type: 'plain_text', text: 'Select teammates' },
+  };
+  if (currentViewerIds.length) element.initial_users = currentViewerIds;
+
+  return {
+    type: 'modal',
+    callback_id: 'home_viewers_modal',
+    private_metadata: JSON.stringify({ channelId }),
+    title: { type: 'plain_text', text: 'Manage Viewers' },
+    submit: { type: 'plain_text', text: 'Save' },
+    close: { type: 'plain_text', text: 'Cancel' },
+    blocks: [
+      { type: 'section', text: { type: 'mrkdwn', text: `Choose who can privately see your translations in <#${channelId}>.` } },
+      {
+        type: 'input',
+        block_id: 'viewers_block',
+        optional: true,
+        label: { type: 'plain_text', text: 'Viewers' },
+        element,
+      },
+    ],
+  };
+}
+
+async function buildHomeView(client, userId) {
+  const isSubscribed = await setHas(KEYS.subscribers, userId);
+  const currentLangCode = getLangCode(await hashGet(KEYS.userIncomingLang, userId) || 'en');
+
+  const watchedChannels = await setAll(KEYS.monitoredChannels);
+  let myChannels = [];
+  try {
+    const result = await client.users.conversations({
+      user: userId,
+      types: 'public_channel,private_channel',
+      limit: 200,
+    });
+    myChannels = (result.channels || []).filter(c => watchedChannels.has(c.id));
+  } catch (_) {
+    // Falls back to an empty list — the section below explains why if this happens.
+  }
+
+  const knownCode = Object.values(LANG_CODES).includes(currentLangCode);
+
+  const blocks = [
+    { type: 'header', text: { type: 'plain_text', text: '⚙️ Ed Translator Settings', emoji: true } },
+    {
+      type: 'section',
+      text: { type: 'mrkdwn', text: isSubscribed
+        ? '✅ *You\'re subscribed* — you receive private translations in watched channels.'
+        : 'You\'re *not subscribed* to auto-translations yet.' },
+      accessory: {
+        type: 'button',
+        text: { type: 'plain_text', text: isSubscribed ? 'Unsubscribe' : 'Subscribe', emoji: true },
+        style: isSubscribed ? 'danger' : 'primary',
+        action_id: 'home_toggle_subscribe',
+        value: isSubscribed ? 'leave' : 'join',
+      },
+    },
+    {
+      type: 'section',
+      text: { type: 'mrkdwn', text: '*Translate incoming messages into:*' },
+      accessory: {
+        type: 'static_select',
+        action_id: 'home_set_lang',
+        ...(knownCode ? { initial_option: {
+          text: { type: 'plain_text', text: langDisplayName(currentLangCode) },
+          value: currentLangCode,
+        } } : {}),
+        options: Object.entries(LANG_CODES).map(([name, code]) => ({
+          text: { type: 'plain_text', text: name.charAt(0).toUpperCase() + name.slice(1) },
+          value: code,
+        })),
+      },
+    },
+    { type: 'divider' },
+    { type: 'header', text: { type: 'plain_text', text: '📡 Watched Channels', emoji: true } },
+  ];
+
+  if (!myChannels.length) {
+    blocks.push({
+      type: 'section',
+      text: { type: 'mrkdwn', text: '_No watched channels you\'re a member of yet. Channels are watched automatically once the bot is added to them — or ask an admin to run `/ed watch`._' },
+    });
+  } else {
+    for (const channel of myChannels) {
+      const muted = await isChannelMutedForUser(userId, channel.id);
+      blocks.push({
+        type: 'section',
+        text: { type: 'mrkdwn', text: `${muted ? '🔕' : '🔔'} <#${channel.id}>${muted ? ' _(muted for you)_' : ''}` },
+        accessory: {
+          type: 'overflow',
+          action_id: 'home_channel_menu',
+          options: [
+            muted
+              ? { text: { type: 'plain_text', text: 'Unmute for me' }, value: `unmute:${channel.id}` }
+              : { text: { type: 'plain_text', text: 'Mute for me' }, value: `mute:${channel.id}` },
+            { text: { type: 'plain_text', text: 'Manage viewers' }, value: `viewers:${channel.id}` },
+          ],
+        },
+      });
+    }
+  }
+
+  return { type: 'home', blocks };
+}
+
+async function publishHomeView(client, userId, logger) {
+  try {
+    const view = await buildHomeView(client, userId);
+    await client.views.publish({ user_id: userId, view });
+  } catch (err) {
+    logger.error('Error publishing home view:', err);
+  }
+}
+
 // ── Incoming: auto-translate messages in monitored channels ────────────────
 app.event('message', async ({ event, client, logger }) => {
   try {
@@ -582,6 +717,9 @@ app.event('message', async ({ event, client, logger }) => {
 
     for (const userId of allSubscribers) {
       if (userId === event.user) continue;
+
+      // Personal opt-out — the channel stays watched for everyone else
+      if (await isChannelMutedForUser(userId, event.channel)) continue;
 
       const targetLang = await hashGet(KEYS.userIncomingLang, userId) || 'en';
       const targetCode = getLangCode(targetLang);
@@ -1238,6 +1376,94 @@ app.view('translate_trans_modal', async ({ view, ack, client, body, logger }) =>
   } catch (err) {
     logger.error('Error in translate_trans_modal submit:', err);
     await ack({ response_action: 'errors', errors: { text_block: 'Something went wrong translating this. Please try again.' } });
+  }
+});
+
+// ── App Home tab: publish settings view when opened ─────────────────────────
+app.event('app_home_opened', async ({ event, client, logger }) => {
+  if (event.tab !== 'home') return;
+  await publishHomeView(client, event.user, logger);
+});
+
+// ── App Home: subscribe/unsubscribe toggle ──────────────────────────────────
+app.action('home_toggle_subscribe', async ({ ack, body, client, logger }) => {
+  await ack();
+  try {
+    const userId = body.user.id;
+    const action = body.actions[0].value;
+    if (action === 'join') await setAdd(KEYS.subscribers, userId);
+    else await setRemove(KEYS.subscribers, userId);
+    await publishHomeView(client, userId, logger);
+  } catch (err) {
+    logger.error('Error in home_toggle_subscribe:', err);
+  }
+});
+
+// ── App Home: incoming-language select ──────────────────────────────────────
+app.action('home_set_lang', async ({ ack, body, client, logger }) => {
+  await ack();
+  try {
+    const userId = body.user.id;
+    const selectedCode = body.actions[0].selected_option.value;
+    await hashSet(KEYS.userIncomingLang, userId, selectedCode);
+    await publishHomeView(client, userId, logger);
+  } catch (err) {
+    logger.error('Error in home_set_lang:', err);
+  }
+});
+
+// ── App Home: per-channel overflow menu (mute/unmute, manage viewers) ──────
+app.action('home_channel_menu', async ({ ack, body, client, logger }) => {
+  await ack();
+  try {
+    const userId = body.user.id;
+    const [action, channelId] = body.actions[0].selected_option.value.split(':');
+
+    if (action === 'mute') {
+      await muteChannelForUser(userId, channelId);
+      await publishHomeView(client, userId, logger);
+    } else if (action === 'unmute') {
+      await unmuteChannelForUser(userId, channelId);
+      await publishHomeView(client, userId, logger);
+    } else if (action === 'viewers') {
+      const currentViewers = await viewersList(userId, channelId);
+      await client.views.open({
+        trigger_id: body.trigger_id,
+        view: viewersModalView(channelId, currentViewers),
+      });
+    }
+  } catch (err) {
+    logger.error('Error in home_channel_menu:', err);
+  }
+});
+
+// ── App Home: viewers modal submit ──────────────────────────────────────────
+app.view('home_viewers_modal', async ({ ack, view, body, logger }) => {
+  try {
+    const { channelId } = JSON.parse(view.private_metadata);
+    const userId = body.user.id;
+    const selected = view.state.values.viewers_block.viewers_input.selected_users || [];
+
+    await viewersClear(userId, channelId);
+    if (selected.length) await viewersAdd(userId, channelId, selected);
+
+    await ack({
+      response_action: 'update',
+      view: {
+        type: 'modal',
+        callback_id: 'home_viewers_saved',
+        title: { type: 'plain_text', text: 'Manage Viewers' },
+        close: { type: 'plain_text', text: 'Close' },
+        blocks: [
+          { type: 'section', text: { type: 'mrkdwn', text: selected.length
+            ? `✅ Saved. Viewers for <#${channelId}>: ${selected.map(id => `<@${id}>`).join(', ')}`
+            : `✅ Saved. No viewers set for <#${channelId}>.` } },
+        ],
+      },
+    });
+  } catch (err) {
+    logger.error('Error in home_viewers_modal submit:', err);
+    await ack();
   }
 });
 
