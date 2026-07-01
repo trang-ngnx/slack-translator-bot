@@ -737,15 +737,26 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
         ...(command.thread_ts ? { thread_ts: command.thread_ts } : {}),
       });
 
+      // Confirmation with the original text — only visible to the sender.
+      // DMs get a persistent DM instead of an ephemeral (unreliable in DMs,
+      // same fix already applied for recap/trans); channels keep the ephemeral
+      // reply anchored to the thread of the sent message.
       const sentTs = sent?.ts || sent?.message?.ts;
-      await client.chat.postEphemeral({
-        channel: command.channel_id,
-        user: command.user_id,
-        thread_ts: sentTs,
-        username: displayName,
-        icon_url: avatarUrl,
-        text: `✅ *Sent (→ ${targetCode})* — only you see this\n*Original:* ${messageText}`,
-      });
+      if (isDM) {
+        await client.chat.postMessage({
+          channel: command.user_id,
+          text: `✅ *Sent (→ ${targetCode})* — only you see this\n*Original:* ${messageText}`,
+        });
+      } else {
+        await client.chat.postEphemeral({
+          channel: command.channel_id,
+          user: command.user_id,
+          thread_ts: sentTs,
+          username: displayName,
+          icon_url: avatarUrl,
+          text: `✅ *Sent (→ ${targetCode})* — only you see this\n*Original:* ${messageText}`,
+        });
+      }
 
       await notifyViewers(client, {
         senderId: command.user_id,
@@ -1132,18 +1143,28 @@ app.view('translate_reply_modal', async ({ view, ack, client, body, logger }) =>
       blocks: [{ type: 'rich_text', elements: translatedRichText.elements }],
     });
 
-    // Ephemeral in the thread of the sent message — only visible to sender
+    // Confirmation with the original text — only visible to the sender.
+    // Ephemeral delivery is unreliable in DMs (same issue fixed elsewhere for
+    // recap/trans), so DMs get a persistent DM from the bot instead; channels
+    // keep the ephemeral reply anchored to the thread of the sent message.
     const originalPlain = richTextToPlain(richTextValue);
     const sentTs = sent?.ts || sent?.message?.ts;
     logger.info(`[modal send] sent.ts=${sentTs}`, sent);
-    await client.chat.postEphemeral({
-      channel: channelId,
-      user: body.user.id,
-      thread_ts: sentTs || threadTs,
-      username: displayName,
-      icon_url: avatarUrl,
-      text: `✅ *Sent (→ ${targetCode})* — only you see this\n*Original:* ${originalPlain}`,
-    });
+    if (channelId.startsWith('D')) {
+      await client.chat.postMessage({
+        channel: body.user.id,
+        text: `✅ *Sent (→ ${targetCode})* — only you see this\n*Original:* ${originalPlain}`,
+      });
+    } else {
+      await client.chat.postEphemeral({
+        channel: channelId,
+        user: body.user.id,
+        thread_ts: sentTs || threadTs,
+        username: displayName,
+        icon_url: avatarUrl,
+        text: `✅ *Sent (→ ${targetCode})* — only you see this\n*Original:* ${originalPlain}`,
+      });
+    }
 
     // Notify viewers — post in the thread of the sent message
     await notifyViewers(client, {
