@@ -219,7 +219,13 @@ const PROTECT_PATTERNS = [
 // common words, not names, even capitalized at position zero) using its own
 // lexicon + context rules, which a hand-rolled stopword list can't cover.
 function detectProperNouns(text) {
-  const terms = nlp(text).match('#ProperNoun+').out('array');
+  // Match single #ProperNoun tokens rather than a greedy "+" chunk: compromise
+  // also tags "I" (as in "I'm") with #ProperNoun since it's always capitalized,
+  // and a "+" span would merge it into an adjacent real name (e.g. "I'm Sylvia"
+  // collapsing into one protected block, leaving "I'm" untranslated). Excluding
+  // #Pronoun filters that out; matching term-by-term instead of chunked still
+  // protects every word of a multi-word name, just as separate placeholders.
+  const terms = nlp(text).match('#ProperNoun').not('#Pronoun').out('array');
   return terms
     .map(t => t.replace(/^[^\w]+|[^\w]+$/g, ''))  // strip stray leading/trailing punctuation
     .filter(Boolean);
@@ -542,7 +548,7 @@ app.event('message', async ({ event, client, logger }) => {
 app.command('/ed', async ({ command, ack, client, logger }) => {
   await ack();
 
-  const USAGE = 'Available commands:\n• `/ed join` — subscribe to auto-translations\n• `/ed leave` — unsubscribe\n• `/ed lang [language]` — set your preferred incoming translation language\n• `/ed watch` — monitor this channel\n• `/ed unwatch` — stop monitoring this channel\n• `/ed dm-watch @user` — monitor DMs from a user sent to the bot\n• `/ed dm-unwatch @user` — stop monitoring\n• `/ed send` — open a modal to compose, translate, and post a message (replies in-thread if run inside a thread)\n• `/ed trans` — open a modal to translate a message or Slack link privately\n• `/ed recap [N]` — DM you the last N translated messages here (default 10; works in DMs, channels, and threads)\n• `/ed recap [message link]` — DM you the full translated thread for a specific message (paste a Slack message link)\n• `/ed viewers add @alice @bob` — let colleagues privately see your translations here\n• `/ed viewers remove @alice` | `list` | `clear`\n• `/ed login` — authorize so your messages send without the "App" badge\n• `/ed logout` — remove your authorization';
+  const USAGE = 'Available commands:\n• `/ed join` — subscribe to auto-translations\n• `/ed leave` — unsubscribe\n• `/ed lang [language]` — set your preferred incoming translation language\n• `/ed watch` — monitor this channel\n• `/ed unwatch` — stop monitoring this channel\n• `/ed dm-watch @user` — monitor DMs from a user sent to the bot\n• `/ed dm-unwatch @user` — stop monitoring\n• `/ed send` — open a modal to compose, translate, and post a message (replies in-thread if run inside a thread)\n• `/ed trans` — open a modal to translate a message or Slack link privately\n• `/ed trans [link or text]` — skip straight to the result popup\n• `/ed recap [N]` — DM you the last N translated messages here (default 10; works in DMs, channels, and threads)\n• `/ed recap [message link]` — DM you the full translated thread for a specific message (paste a Slack message link)\n• `/ed viewers add @alice @bob` — let colleagues privately see your translations here\n• `/ed viewers remove @alice` | `list` | `clear`\n• `/ed login` — authorize so your messages send without the "App" badge\n• `/ed logout` — remove your authorization';
 
   const isDM = command.channel_id.startsWith('D');
   async function reply(text) {
@@ -659,9 +665,33 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
       });
 
     } else if (subcommand === 'trans') {
+      if (!args) {
+        await client.views.open({
+          trigger_id: command.trigger_id,
+          view: translateTransModalView(),
+        });
+        return;
+      }
+
+      // Inline text/link provided — skip the input modal and pop the result directly.
+      let textToTranslate = args;
+      const match = args.match(/\/archives\/([A-Z0-9]+)\/p(\d{10})(\d{6})/);
+      if (match) {
+        const channelId = match[1];
+        const ts = `${match[2]}.${match[3]}`;
+        const result = await client.conversations.history({ channel: channelId, latest: ts, inclusive: true, limit: 1 });
+        const message = result.messages?.[0];
+        if (!message?.text) {
+          await reply('❌ Could not fetch that message. Make sure the bot is invited to that channel.\n\nTip: for DM messages, copy the text directly and use `/ed trans [paste text]` instead.');
+          return;
+        }
+        textToTranslate = message.text;
+      }
+
+      const translated = await translate(textToTranslate, 'English');
       await client.views.open({
         trigger_id: command.trigger_id,
-        view: translateTransModalView(),
+        view: translateTransResultView({ original: textToTranslate, translated, targetCode: 'en' }),
       });
 
     // ── ed recap ───────────────────────────────────────────────────────────
