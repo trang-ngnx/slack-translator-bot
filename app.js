@@ -548,7 +548,7 @@ app.event('message', async ({ event, client, logger }) => {
 app.command('/ed', async ({ command, ack, client, logger }) => {
   await ack();
 
-  const USAGE = 'Available commands:\n• `/ed join` — subscribe to auto-translations\n• `/ed leave` — unsubscribe\n• `/ed lang [language]` — set your preferred incoming translation language\n• `/ed watch` — monitor this channel\n• `/ed unwatch` — stop monitoring this channel\n• `/ed dm-watch @user` — monitor DMs from a user sent to the bot\n• `/ed dm-unwatch @user` — stop monitoring\n• `/ed send` — open a modal to compose, translate, and post a message (replies in-thread if run inside a thread)\n• `/ed trans` — open a modal to translate a message or Slack link privately\n• `/ed trans [link or text]` — skip straight to the result popup\n• `/ed recap [N]` — DM you the last N translated messages here (default 10; works in DMs, channels, and threads)\n• `/ed recap [message link]` — DM you the full translated thread for a specific message (paste a Slack message link)\n• `/ed viewers add @alice @bob` — let colleagues privately see your translations here\n• `/ed viewers remove @alice` | `list` | `clear`\n• `/ed login` — authorize so your messages send without the "App" badge\n• `/ed logout` — remove your authorization';
+  const USAGE = 'Available commands:\n• `/ed join` — subscribe to auto-translations\n• `/ed leave` — unsubscribe\n• `/ed lang [language]` — set your preferred incoming translation language\n• `/ed watch` — monitor this channel\n• `/ed unwatch` — stop monitoring this channel\n• `/ed dm-watch @user` — monitor DMs from a user sent to the bot\n• `/ed dm-unwatch @user` — stop monitoring\n• `/ed send` — open a modal to compose, translate, and post a message (replies in-thread if run inside a thread)\n• `/ed send [language] [link or text]` — skip the modal and post directly\n• `/ed trans` — open a modal to translate a message or Slack link privately\n• `/ed trans [link or text]` — skip straight to the result popup\n• `/ed recap [N]` — DM you the last N translated messages here (default 10; works in DMs, channels, and threads)\n• `/ed recap [message link]` — DM you the full translated thread for a specific message (paste a Slack message link)\n• `/ed viewers add @alice @bob` — let colleagues privately see your translations here\n• `/ed viewers remove @alice` | `list` | `clear`\n• `/ed login` — authorize so your messages send without the "App" badge\n• `/ed logout` — remove your authorization';
 
   const isDM = command.channel_id.startsWith('D');
   async function reply(text) {
@@ -659,9 +659,71 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
       }
 
     } else if (subcommand === 'send') {
-      await client.views.open({
-        trigger_id: command.trigger_id,
-        view: translateReplyModalView(command.channel_id, command.thread_ts),
+      if (!args) {
+        await client.views.open({
+          trigger_id: command.trigger_id,
+          view: translateReplyModalView(command.channel_id, command.thread_ts),
+        });
+        return;
+      }
+
+      // Inline "[language] [link or text]" — skip the modal and post directly.
+      const [langToken, ...rest] = args.split(/\s+/);
+      let messageText = rest.join(' ').trim();
+      if (!messageText) {
+        await reply('❌ Usage: `/ed send [language] [link or text]` — e.g. `/ed send ja Hello!` or `/ed send vi [Slack message link]`');
+        return;
+      }
+
+      const targetCode = getLangCode(langToken);
+
+      const linkMatch = messageText.match(/\/archives\/([A-Z0-9]+)\/p(\d{10})(\d{6})/);
+      if (linkMatch) {
+        const linkedChannelId = linkMatch[1];
+        const ts = `${linkMatch[2]}.${linkMatch[3]}`;
+        const linkResult = await client.conversations.history({ channel: linkedChannelId, latest: ts, inclusive: true, limit: 1 });
+        const linkedMessage = linkResult.messages?.[0];
+        if (!linkedMessage?.text) {
+          await reply('❌ Could not fetch that message. Make sure the bot is invited to that channel.');
+          return;
+        }
+        messageText = linkedMessage.text;
+      }
+
+      const translated = await translate(messageText, targetCode);
+
+      const profileRes = await client.users.info({ user: command.user_id });
+      const profile = profileRes.user?.profile;
+      const displayName = profile?.display_name || profile?.real_name || 'Unknown';
+      const avatarUrl = profile?.image_72;
+
+      const sent = await postAsUser(client, command.user_id, {
+        channel: command.channel_id,
+        text: translated,
+        username: displayName,
+        icon_url: avatarUrl,
+        ...(command.thread_ts ? { thread_ts: command.thread_ts } : {}),
+      });
+
+      const sentTs = sent?.ts || sent?.message?.ts;
+      await client.chat.postEphemeral({
+        channel: command.channel_id,
+        user: command.user_id,
+        thread_ts: sentTs,
+        username: displayName,
+        icon_url: avatarUrl,
+        text: `✅ *Sent (→ ${targetCode})* — only you see this\n*Original:* ${messageText}`,
+      });
+
+      await notifyViewers(client, {
+        senderId: command.user_id,
+        channelId: command.channel_id,
+        threadTs: sentTs,
+        senderName: displayName,
+        senderAvatarUrl: avatarUrl,
+        originalText: messageText,
+        translatedBlocks: [{ type: 'rich_text_section', elements: [{ type: 'text', text: translated }] }],
+        targetLabel: targetCode,
       });
 
     } else if (subcommand === 'trans') {
