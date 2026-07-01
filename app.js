@@ -198,6 +198,15 @@ function getLangCode(input) {
 // the first word of an inline command is a language prefix or just the message itself.
 const KNOWN_LANG_TOKENS = new Set([...Object.keys(LANG_CODES), ...Object.values(LANG_CODES)]);
 
+// Google's language detector tags Chinese with a region suffix (e.g. "zh-CN"/"zh-TW")
+// that never equals our bare "zh" from LANG_CODES, so a detected-vs-preferred-language
+// equality check would always report "different" for Chinese even when they match.
+// Only used for comparing a *detected* code against one of ours — not for codes sent
+// to Google as a translation target, where region-suffixed forms are valid as-is.
+function normalizeDetectedLang(code) {
+  return code ? code.split('-')[0] : code;
+}
+
 function escapeRegex(str) {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -495,7 +504,7 @@ app.event('message', async ({ event, client, logger }) => {
     let detectedLang = null;
     try {
       const detectJson = await googleTranslateRaw(event.text.slice(0, 200), 'en');
-      detectedLang = detectJson[2] || null;
+      detectedLang = normalizeDetectedLang(detectJson[2]) || null;
     } catch (_) {}
 
     // Fetch sender's display name once for all subscribers
@@ -905,7 +914,7 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
         let translatedText = msg.text;
         try {
           const detectJson = await googleTranslateRaw(msg.text.slice(0, 200), targetCode);
-          const detectedLang = detectJson[2];
+          const detectedLang = normalizeDetectedLang(detectJson[2]);
           if (detectedLang && detectedLang !== targetCode) {
             translatedText = await translate(msg.text, targetLang);
           }
