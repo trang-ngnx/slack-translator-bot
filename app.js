@@ -811,6 +811,7 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
 
       let rawMessages = [];
       let contextLabel = '';
+      let originalLink = null;
 
       // Detect a Slack message link anywhere in args.
       // Parent link:  .../archives/CHANNEL/p0123456789012345
@@ -820,6 +821,7 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
       if (linkMatch) {
         const targetChannelId = linkMatch[1];
         const messageTs = `${linkMatch[2]}.${linkMatch[3]}`;
+        originalLink = args.split(/\s+/).find(w => w.startsWith('http') || w.includes('/archives/')) || null;
 
         // thread_ts query param is present when the link points to a thread reply
         const threadTsParam = args.match(/[?&]thread_ts=([\d.]+)/)?.[1];
@@ -932,7 +934,8 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
         return;
       }
 
-      await sendRecapResult(`📋 *Last ${lines.length} messages in this ${contextLabel} (→ ${targetCode}):*\n\n${lines.join('\n\n─────\n')}`);
+      const linkLine = originalLink ? `\n<${originalLink}|🔗 View original message>` : '';
+      await sendRecapResult(`📋 *Last ${lines.length} messages in this ${contextLabel} (→ ${targetCode}):*${linkLine}\n\n${lines.join('\n\n─────\n')}`);
       if (!isDM) {
         await reply('📨 Sent the recap to your DMs with me — check there so it\'s available on any device.');
       }
