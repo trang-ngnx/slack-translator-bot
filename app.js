@@ -773,38 +773,47 @@ app.event('message', async ({ event, client, logger }) => {
     for (const userId of allSubscribers) {
       if (userId === event.user) continue;
 
-      // Personal opt-out — the channel stays watched for everyone else
-      if (await isChannelMutedForUser(userId, event.channel)) continue;
+      // Isolated per-subscriber: subscribing is global, not scoped to specific
+      // channels, so a subscriber who isn't actually a member of this channel
+      // is expected (postEphemeral will just fail for them). Without this,
+      // one such failure would throw out of the loop and silently skip every
+      // other, legitimate subscriber for this message too.
+      try {
+        // Personal opt-out — the channel stays watched for everyone else
+        if (await isChannelMutedForUser(userId, event.channel)) continue;
 
-      const targetLang = await hashGet(KEYS.userIncomingLang, userId) || 'en';
-      const targetCode = getLangCode(targetLang);
+        const targetLang = await hashGet(KEYS.userIncomingLang, userId) || 'en';
+        const targetCode = getLangCode(targetLang);
 
-      // Skip if message is already in the user's target language
-      if (detectedLang && detectedLang === targetCode) continue;
+        // Skip if message is already in the user's target language
+        if (detectedLang && detectedLang === targetCode) continue;
 
-      const translated = await translate(event.text, targetLang);
-      const actionButtons = [
-        {
-          type: 'button',
-          text: { type: 'plain_text', text: '✏️ Reply with translation', emoji: true },
-          style: 'primary',
-          action_id: 'thread_open_reply_modal',
-          value: ctx,
-        },
-      ];
-      await client.chat.postEphemeral({
-        channel: event.channel,
-        user: userId,
-        ...(isThreadReply ? { thread_ts: threadTs } : {}),
-        text: `🌐 *[${senderName}]* ${translated}`,
-        blocks: [
+        const translated = await translate(event.text, targetLang);
+        const actionButtons = [
           {
-            type: 'section',
-            text: { type: 'mrkdwn', text: `🌐 *[${senderName}]* ${translated}` },
+            type: 'button',
+            text: { type: 'plain_text', text: '✏️ Reply with translation', emoji: true },
+            style: 'primary',
+            action_id: 'thread_open_reply_modal',
+            value: ctx,
           },
-          { type: 'actions', elements: actionButtons },
-        ],
-      });
+        ];
+        await client.chat.postEphemeral({
+          channel: event.channel,
+          user: userId,
+          ...(isThreadReply ? { thread_ts: threadTs } : {}),
+          text: `🌐 *[${senderName}]* ${translated}`,
+          blocks: [
+            {
+              type: 'section',
+              text: { type: 'mrkdwn', text: `🌐 *[${senderName}]* ${translated}` },
+            },
+            { type: 'actions', elements: actionButtons },
+          ],
+        });
+      } catch (err) {
+        logger.error(`Error notifying subscriber ${userId}:`, err);
+      }
     }
   } catch (err) {
     logger.error('Error translating incoming message:', err);
