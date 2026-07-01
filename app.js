@@ -374,6 +374,55 @@ function translateReplyModalView(channelId, threadTs) {
   };
 }
 
+function translateTransModalView() {
+  return {
+    type: 'modal',
+    callback_id: 'translate_trans_modal',
+    title: { type: 'plain_text', text: 'Translate' },
+    submit: { type: 'plain_text', text: 'Translate' },
+    close: { type: 'plain_text', text: 'Cancel' },
+    blocks: [
+      {
+        type: 'input',
+        block_id: 'text_block',
+        label: { type: 'plain_text', text: 'Message or Slack link' },
+        element: {
+          type: 'plain_text_input',
+          action_id: 'text_input',
+          multiline: true,
+          placeholder: { type: 'plain_text', text: 'Paste text, or a Slack message link…' },
+        },
+      },
+      {
+        type: 'input',
+        block_id: 'lang_block',
+        label: { type: 'plain_text', text: 'Target language (optional)' },
+        hint: { type: 'plain_text', text: 'e.g. en, ja, vi — leave blank for English' },
+        optional: true,
+        element: {
+          type: 'plain_text_input',
+          action_id: 'lang_input',
+          placeholder: { type: 'plain_text', text: 'en' },
+        },
+      },
+    ],
+  };
+}
+
+function translateTransResultView({ original, translated, targetCode }) {
+  return {
+    type: 'modal',
+    callback_id: 'translate_trans_result',
+    title: { type: 'plain_text', text: 'Translation' },
+    close: { type: 'plain_text', text: 'Close' },
+    blocks: [
+      { type: 'section', text: { type: 'mrkdwn', text: `*Original:*\n${original}` } },
+      { type: 'divider' },
+      { type: 'section', text: { type: 'mrkdwn', text: `*Translation (→ ${targetCode}):*\n${translated}` } },
+    ],
+  };
+}
+
 // ── Incoming: auto-translate messages in monitored channels ────────────────
 app.event('message', async ({ event, client, logger }) => {
   try {
@@ -454,7 +503,7 @@ app.event('message', async ({ event, client, logger }) => {
 app.command('/ed', async ({ command, ack, client, logger }) => {
   await ack();
 
-  const USAGE = 'Available commands:\n• `/ed join` — subscribe to auto-translations\n• `/ed leave` — unsubscribe\n• `/ed lang [language]` — set your preferred incoming translation language\n• `/ed watch` — monitor this channel\n• `/ed unwatch` — stop monitoring this channel\n• `/ed dm-watch @user` — monitor DMs from a user sent to the bot\n• `/ed dm-unwatch @user` — stop monitoring\n• `/ed send` — open a modal to compose, translate, and post a message (replies in-thread if run inside a thread)\n• `/ed trans [link or text]` — translate privately\n• `/ed recap [N]` — DM you the last N translated messages here (default 10; works in DMs, channels, and threads)\n• `/ed recap [message link]` — DM you the full translated thread for a specific message (paste a Slack message link)\n• `/ed viewers add @alice @bob` — let colleagues privately see your translations here\n• `/ed viewers remove @alice` | `list` | `clear`\n• `/ed login` — authorize so your messages send without the "App" badge\n• `/ed logout` — remove your authorization';
+  const USAGE = 'Available commands:\n• `/ed join` — subscribe to auto-translations\n• `/ed leave` — unsubscribe\n• `/ed lang [language]` — set your preferred incoming translation language\n• `/ed watch` — monitor this channel\n• `/ed unwatch` — stop monitoring this channel\n• `/ed dm-watch @user` — monitor DMs from a user sent to the bot\n• `/ed dm-unwatch @user` — stop monitoring\n• `/ed send` — open a modal to compose, translate, and post a message (replies in-thread if run inside a thread)\n• `/ed trans` — open a modal to translate a message or Slack link privately\n• `/ed recap [N]` — DM you the last N translated messages here (default 10; works in DMs, channels, and threads)\n• `/ed recap [message link]` — DM you the full translated thread for a specific message (paste a Slack message link)\n• `/ed viewers add @alice @bob` — let colleagues privately see your translations here\n• `/ed viewers remove @alice` | `list` | `clear`\n• `/ed login` — authorize so your messages send without the "App" badge\n• `/ed logout` — remove your authorization';
 
   const isDM = command.channel_id.startsWith('D');
   async function reply(text) {
@@ -571,28 +620,10 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
       });
 
     } else if (subcommand === 'trans') {
-      if (!args) {
-        await reply('❌ Usage:\n• `/ed trans [Slack message link]` — translate a message by link\n• `/ed trans [any text]` — translate text directly');
-        return;
-      }
-
-      let textToTranslate = args;
-
-      const match = args.match(/\/archives\/([A-Z0-9]+)\/p(\d{10})(\d{6})/);
-      if (match) {
-        const channelId = match[1];
-        const ts = `${match[2]}.${match[3]}`;
-        const result = await client.conversations.history({ channel: channelId, latest: ts, inclusive: true, limit: 1 });
-        const message = result.messages?.[0];
-        if (!message?.text) {
-          await reply('❌ Could not fetch that message. Make sure the bot is invited to that channel.\n\nTip: for DM messages, copy the text directly and use `/ed trans [paste text]` instead.');
-          return;
-        }
-        textToTranslate = message.text;
-      }
-
-      const translated = await translate(textToTranslate, 'English');
-      await reply(`🌐 *Translation (only you see this):*\n${translated}`);
+      await client.views.open({
+        trigger_id: command.trigger_id,
+        view: translateTransModalView(),
+      });
 
     // ── ed recap ───────────────────────────────────────────────────────────
     } else if (subcommand === 'recap') {
@@ -942,6 +973,45 @@ app.view('translate_reply_modal', async ({ view, ack, client, body, logger }) =>
     });
   } catch (err) {
     logger.error('Error in translate_reply_modal submit:', err);
+  }
+});
+
+// ── Modal submit: translate & show result in-place ─────────────────────────
+app.view('translate_trans_modal', async ({ view, ack, client, logger }) => {
+  try {
+    const textInput = view.state.values.text_block.text_input.value?.trim();
+    const langInput = view.state.values.lang_block.lang_input.value?.trim();
+
+    if (!textInput) {
+      await ack({ response_action: 'errors', errors: { text_block: 'Please enter a message or Slack link.' } });
+      return;
+    }
+
+    let textToTranslate = textInput;
+    const match = textInput.match(/\/archives\/([A-Z0-9]+)\/p(\d{10})(\d{6})/);
+    if (match) {
+      const channelId = match[1];
+      const ts = `${match[2]}.${match[3]}`;
+      const result = await client.conversations.history({ channel: channelId, latest: ts, inclusive: true, limit: 1 });
+      const message = result.messages?.[0];
+      if (!message?.text) {
+        await ack({ response_action: 'errors', errors: { text_block: 'Could not fetch that message. Make sure the bot is invited to that channel.' } });
+        return;
+      }
+      textToTranslate = message.text;
+    }
+
+    const targetLabel = langInput || 'English';
+    const targetCode = getLangCode(targetLabel);
+    const translated = await translate(textToTranslate, targetLabel);
+
+    await ack({
+      response_action: 'update',
+      view: translateTransResultView({ original: textToTranslate, translated, targetCode }),
+    });
+  } catch (err) {
+    logger.error('Error in translate_trans_modal submit:', err);
+    await ack({ response_action: 'errors', errors: { text_block: 'Something went wrong translating this. Please try again.' } });
   }
 });
 

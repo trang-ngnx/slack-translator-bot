@@ -48,7 +48,7 @@ In your app settings → **Slash Commands** → **Create New Command**:
 - Command: `/ed`
 - Request URL: `https://YOUR-RAILWAY-URL.railway.app/slack/events`
 - Description: Translate messages — use `send` or `trans` as subcommands
-- Usage hint: `send [your message] | trans [Slack message link]`
+- Usage hint: `send | trans | recap | join | watch`
 
 > All bot actions go through a single `/ed` command. The word after `/ed` determines what it does.
 
@@ -120,10 +120,8 @@ In each channel you want to monitor or use `/translate` in, type:
 ### Translation
 | What you want | What to do |
 |---|---|
-| Translate a message by link | Right-click message → **Copy link** → `/ed trans [paste link]` |
-| Translate text directly | `/ed trans [paste text]` |
-| Post a message in the channel's language | `/ed send Hello I'll join in 5 minutes` |
-| Force a specific language | `/ed send Japanese: Hello I'll join in 5 minutes` |
+| Translate a message or link privately | `/ed trans` → opens a modal, paste text or a Slack message link, pick a language (optional) |
+| Post a translated message in a channel or thread | `/ed send` → opens a modal, write your message, pick a language (optional) |
 
 ## For new users / colleagues
 
