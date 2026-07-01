@@ -579,6 +579,39 @@ function langDisplayName(code) {
   return name.charAt(0).toUpperCase() + name.slice(1);
 }
 
+// multi_users_select only works inside an `input` block, which only modals
+// support — Home tab views reject it outright ("unsupported element:
+// multiselect"). So adding/removing viewers has to go through a modal; the
+// Home tab's "Clear all" button is the one bulk action that can stay inline
+// since a plain button has no such restriction.
+function viewersModalView(channelId, currentViewerIds) {
+  const element = {
+    type: 'multi_users_select',
+    action_id: 'viewers_input',
+    placeholder: { type: 'plain_text', text: 'Select teammates' },
+  };
+  if (currentViewerIds.length) element.initial_users = currentViewerIds;
+
+  return {
+    type: 'modal',
+    callback_id: 'home_viewers_modal',
+    private_metadata: JSON.stringify({ channelId }),
+    title: { type: 'plain_text', text: 'Manage Viewers' },
+    submit: { type: 'plain_text', text: 'Save' },
+    close: { type: 'plain_text', text: 'Cancel' },
+    blocks: [
+      { type: 'section', text: { type: 'mrkdwn', text: `Choose who can privately see your translations in <#${channelId}>.` } },
+      {
+        type: 'input',
+        block_id: 'viewers_block',
+        optional: true,
+        label: { type: 'plain_text', text: 'Viewers' },
+        element,
+      },
+    ],
+  };
+}
+
 // Channels the given user belongs to that are also currently watched —
 // shared by both the Watched Channels and Viewers sections below.
 async function getMyWatchedChannels(client, userId) {
@@ -701,31 +734,28 @@ async function buildHomeView(client, userId) {
   } else {
     for (const channel of myChannels) {
       const currentViewers = await viewersList(userId, channel.id);
-      const viewersSection = {
+      blocks.push({
         type: 'section',
         text: { type: 'mrkdwn', text: currentViewers.length
           ? `*<#${channel.id}>* — ${currentViewers.map(id => `<@${id}>`).join(', ')}`
           : `*<#${channel.id}>* — _no viewers set_` },
-      };
+      });
+      const actionElements = [{
+        type: 'button',
+        text: { type: 'plain_text', text: 'Manage viewers' },
+        action_id: 'home_manage_viewers',
+        value: channel.id,
+      }];
       if (currentViewers.length) {
-        viewersSection.accessory = {
+        actionElements.push({
           type: 'button',
           text: { type: 'plain_text', text: 'Clear all' },
           style: 'danger',
           action_id: 'home_viewers_clear',
           value: channel.id,
-        };
+        });
       }
-      blocks.push(viewersSection, {
-        type: 'actions',
-        block_id: `viewers_actions:${channel.id}`,
-        elements: [{
-          type: 'multi_users_select',
-          action_id: 'home_viewers_select',
-          placeholder: { type: 'plain_text', text: 'Add or remove viewers…' },
-          ...(currentViewers.length ? { initial_users: currentViewers } : {}),
-        }],
-      });
+      blocks.push({ type: 'actions', block_id: `viewers_actions:${channel.id}`, elements: actionElements });
     }
   }
 
@@ -1513,20 +1543,37 @@ app.action('home_toggle_mute', async ({ ack, body, client, logger }) => {
 // ── App Home: link-out button — no-op, just needs to be acknowledged ───────
 app.action('home_open_canvas', async ({ ack }) => { await ack(); });
 
-// ── App Home: viewers multi-select — replaces the full set on every change,
-// so adding or removing someone is just changing the selection, no command
-// or modal needed.
-app.action('home_viewers_select', async ({ ack, body, client, logger }) => {
+// ── App Home: "Manage viewers" opens a modal (multi-select requires one) ───
+app.action('home_manage_viewers', async ({ ack, body, client, logger }) => {
   await ack();
   try {
     const userId = body.user.id;
-    const channelId = body.actions[0].block_id.split(':')[1];
-    const selected = body.actions[0].selected_users || [];
+    const channelId = body.actions[0].value;
+    const currentViewers = await viewersList(userId, channelId);
+    await client.views.open({
+      trigger_id: body.trigger_id,
+      view: viewersModalView(channelId, currentViewers),
+    });
+  } catch (err) {
+    logger.error('Error in home_manage_viewers:', err);
+  }
+});
+
+// ── App Home: viewers modal submit — replaces the full viewer set ──────────
+app.view('home_viewers_modal', async ({ ack, view, body, client, logger }) => {
+  try {
+    const { channelId } = JSON.parse(view.private_metadata);
+    const userId = body.user.id;
+    const selected = view.state.values.viewers_block.viewers_input.selected_users || [];
+
     await viewersClear(userId, channelId);
     if (selected.length) await viewersAdd(userId, channelId, selected);
+
+    await ack();
     await publishHomeView(client, userId, logger);
   } catch (err) {
-    logger.error('Error in home_viewers_select:', err);
+    logger.error('Error in home_viewers_modal submit:', err);
+    await ack();
   }
 });
 
