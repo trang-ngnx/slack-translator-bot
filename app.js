@@ -1009,8 +1009,8 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
         `👋 *Welcome to the ED Translator Bot!*\n\nHere's how to get started:\n\n` +
         `*1. Authorize yourself (required)*\n` +
         `Run \`/ed login\` and follow the link in your DMs. This lets your messages appear as *you* — not as the bot app. This is important when communicating with clients and partners.\n\n` +
-        `*2. Subscribe to translations*\n` +
-        `Run \`/ed join\` — you'll start receiving private translations for new messages in monitored channels.\n\n` +
+        `*2. Subscribe to auto-translations*\n` +
+        `Run \`/ed join\` — you'll start automatically receiving private translations for new messages in monitored channels, with no action needed on your part.\n\n` +
         `*3. Set your language*\n` +
         `Run \`/ed lang Vietnamese\` (or any language) to receive translations in your preferred language.\n\n` +
         `*4. Monitor a channel*\n` +
