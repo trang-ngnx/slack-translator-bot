@@ -95,40 +95,31 @@ async function postAsUser(botClient, userId, params) {
   return botClient.chat.postMessage(params);
 }
 
-// Messages this bot posts on someone's behalf (postAsUser's fallback path, when the
-// sender hasn't done /ed login) still carry this app's own bot_id even though they
-// display under the sender's name/avatar via chat:write.customize — they're real
-// human content, not automated bot noise. Cached since it never changes at runtime.
-let ownBotId = null;
-async function getOwnBotId(client) {
-  if (ownBotId) return ownBotId;
-  const auth = await client.auth.test();
-  ownBotId = auth.bot_id;
-  return ownBotId;
-}
+// Subtypes that are never real conversation content — channel/membership
+// housekeeping and edit/delete markers. Deliberately NOT excluding by bot_id:
+// a shared channel can have real human content relayed through all sorts of
+// bots — this app's own translated replies (posted via postAsUser's fallback,
+// which Slack tags with subtype "bot_message"), but also messages from other
+// companies' own bot/app integrations in a cross-org channel. There's no way
+// to allowlist every legitimate bot in advance, so any message with real text
+// is treated as recap-worthy regardless of which app posted it.
+const NON_CONVERSATIONAL_SUBTYPES = new Set([
+  'channel_join', 'channel_leave', 'group_join', 'group_leave',
+  'channel_topic', 'channel_purpose', 'channel_name',
+  'channel_archive', 'channel_unarchive',
+  'pinned_item', 'unpinned_item',
+  'message_changed', 'message_deleted',
+]);
 
-// A message counts as "real conversation content" if it's from a person, or from
-// this bot posting translated content on their behalf — but not from any other
-// app/bot, and not a system subtype (channel_join, message edits, etc.).
-//
-// Slack tags any chat.postMessage call that overrides username/icon_url (exactly
-// what postAsUser's fallback does via chat:write.customize) with subtype
-// "bot_message" — so a blanket "!m.subtype" check silently drops these same
-// real, human-authored translated messages that the bot_id check above was
-// already special-cased to allow through. Only treat "bot_message" as
-// disqualifying when it's NOT this app's own customized post.
-function isRecapWorthy(m, myBotId) {
-  const isOwnBotMessage = !!m.bot_id && m.bot_id === myBotId;
-  const okSender = !m.bot_id || isOwnBotMessage;
-  const okSubtype = !m.subtype || (isOwnBotMessage && m.subtype === 'bot_message');
-  return okSender && okSubtype && !!m.text?.trim();
+function isRecapWorthy(m) {
+  return (!m.subtype || !NON_CONVERSATIONAL_SUBTYPES.has(m.subtype)) && !!m.text?.trim();
 }
 
 // Temporary diagnostic for tracking down why some real, persisted messages
 // aren't surviving recap's filter — logs exactly what each raw message looked
 // like and whether/why it was kept, so a failure is visible in Railway logs
 // instead of requiring another guess-and-check round.
-function logRecapFilter(logger, label, myBotId, rawMessages) {
+function logRecapFilter(logger, label, rawMessages) {
   const summary = rawMessages.map(m => ({
     ts: m.ts,
     user: m.user || null,
@@ -137,9 +128,9 @@ function logRecapFilter(logger, label, myBotId, rawMessages) {
     subtype: m.subtype || null,
     hasText: !!m.text?.trim(),
     textPreview: m.text ? m.text.slice(0, 40) : null,
-    kept: isRecapWorthy(m, myBotId),
+    kept: isRecapWorthy(m),
   }));
-  logger.info(`[recap:${label}] myBotId=${myBotId} fetched=${rawMessages.length} ${JSON.stringify(summary)}`);
+  logger.info(`[recap:${label}] fetched=${rawMessages.length} ${JSON.stringify(summary)}`);
 }
 
 // ── Slack app (ExpressReceiver for custom OAuth route) ─────────────────────
@@ -832,8 +823,6 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
       const sendRecapResult = (text) => client.chat.postMessage({ channel: command.user_id, text });
 
       try {
-      const myBotId = await getOwnBotId(client);
-
       const targetLang = await hashGet(KEYS.userIncomingLang, command.user_id) || 'en';
       const targetCode = getLangCode(targetLang);
 
@@ -868,9 +857,9 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
             ts: threadTs,
             limit: count + 15,
           });
-          logRecapFilter(logger, 'linked thread', myBotId, result.messages || []);
+          logRecapFilter(logger, 'linked thread', result.messages || []);
           rawMessages = (result.messages || [])
-            .filter(m => isRecapWorthy(m, myBotId))
+            .filter(m => isRecapWorthy(m))
             .slice(-count);
           contextLabel = 'linked thread';
         } catch (err) {
@@ -884,9 +873,9 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
           ts: command.thread_ts,
           limit: count + 15,
         });
-        logRecapFilter(logger, 'thread', myBotId, result.messages || []);
+        logRecapFilter(logger, 'thread', result.messages || []);
         rawMessages = (result.messages || [])
-          .filter(m => isRecapWorthy(m, myBotId))
+          .filter(m => isRecapWorthy(m))
           .slice(-count);
         contextLabel = 'thread';
       } else {
@@ -895,9 +884,9 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
           channel: command.channel_id,
           limit: count + 15,
         });
-        logRecapFilter(logger, 'channel/DM', myBotId, result.messages || []);
+        logRecapFilter(logger, 'channel/DM', result.messages || []);
         rawMessages = (result.messages || [])
-          .filter(m => isRecapWorthy(m, myBotId))
+          .filter(m => isRecapWorthy(m))
           .slice(0, count)
           .reverse();
         contextLabel = isDM ? 'DM' : 'channel';
