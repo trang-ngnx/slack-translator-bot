@@ -194,6 +194,10 @@ function getLangCode(input) {
   return LANG_CODES[lower] || lower;
 }
 
+// Recognized language names/codes (e.g. "Japanese" or "ja") — used to tell whether
+// the first word of an inline command is a language prefix or just the message itself.
+const KNOWN_LANG_TOKENS = new Set([...Object.keys(LANG_CODES), ...Object.values(LANG_CODES)]);
+
 function escapeRegex(str) {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -548,7 +552,7 @@ app.event('message', async ({ event, client, logger }) => {
 app.command('/ed', async ({ command, ack, client, logger }) => {
   await ack();
 
-  const USAGE = 'Available commands:\n• `/ed join` — subscribe to auto-translations\n• `/ed leave` — unsubscribe\n• `/ed lang [language]` — set your preferred incoming translation language\n• `/ed watch` — monitor this channel\n• `/ed unwatch` — stop monitoring this channel\n• `/ed dm-watch @user` — monitor DMs from a user sent to the bot\n• `/ed dm-unwatch @user` — stop monitoring\n• `/ed send` — open a modal to compose, translate, and post a message (replies in-thread if run inside a thread)\n• `/ed send [language] [link or text]` — skip the modal and post directly\n• `/ed trans` — open a modal to translate a message or Slack link privately\n• `/ed trans [link or text]` — skip straight to the result popup\n• `/ed recap [N]` — DM you the last N translated messages here (default 10; works in DMs, channels, and threads)\n• `/ed recap [message link]` — DM you the full translated thread for a specific message (paste a Slack message link)\n• `/ed viewers add @alice @bob` — let colleagues privately see your translations here\n• `/ed viewers remove @alice` | `list` | `clear`\n• `/ed login` — authorize so your messages send without the "App" badge\n• `/ed logout` — remove your authorization';
+  const USAGE = 'Available commands:\n• `/ed join` — subscribe to auto-translations\n• `/ed leave` — unsubscribe\n• `/ed lang [language]` — set your preferred incoming translation language\n• `/ed watch` — monitor this channel\n• `/ed unwatch` — stop monitoring this channel\n• `/ed dm-watch @user` — monitor DMs from a user sent to the bot\n• `/ed dm-unwatch @user` — stop monitoring\n• `/ed send` — open a modal to compose, translate, and post a message (replies in-thread if run inside a thread)\n• `/ed send [language] [link or text]` — skip the modal and post directly\n• `/ed trans` — open a modal to translate a message or Slack link privately\n• `/ed trans [link or text]` — skip straight to the result popup (defaults to English)\n• `/ed trans [language] [link or text]` — same, but translate to a specific language\n• `/ed recap [N]` — DM you the last N translated messages here (default 10; works in DMs, channels, and threads)\n• `/ed recap [message link]` — DM you the full translated thread for a specific message (paste a Slack message link)\n• `/ed viewers add @user1 @user2` — let colleagues privately see your translations here\n• `/ed viewers remove @user1` | `list` | `clear`\n• `/ed login` — authorize so your messages send without the "App" badge\n• `/ed logout` — remove your authorization';
 
   const isDM = command.channel_id.startsWith('D');
   async function reply(text) {
@@ -735,9 +739,18 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
         return;
       }
 
-      // Inline text/link provided — skip the input modal and pop the result directly.
+      // Inline "[language] [link or text]" or plain "[link or text]" (→ English).
+      // A leading word only counts as a language if it's a recognized name/code —
+      // otherwise it's ambiguous with the first word of an ordinary message.
+      const [firstToken, ...transRest] = args.split(/\s+/);
+      let targetLabel = 'English';
       let textToTranslate = args;
-      const match = args.match(/\/archives\/([A-Z0-9]+)\/p(\d{10})(\d{6})/);
+      if (transRest.length && KNOWN_LANG_TOKENS.has(firstToken.toLowerCase())) {
+        targetLabel = firstToken;
+        textToTranslate = transRest.join(' ').trim();
+      }
+
+      const match = textToTranslate.match(/\/archives\/([A-Z0-9]+)\/p(\d{10})(\d{6})/);
       if (match) {
         const channelId = match[1];
         const ts = `${match[2]}.${match[3]}`;
@@ -750,10 +763,11 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
         textToTranslate = message.text;
       }
 
-      const translated = await translate(textToTranslate, 'English');
+      const targetCode = getLangCode(targetLabel);
+      const translated = await translate(textToTranslate, targetLabel);
       await client.views.open({
         trigger_id: command.trigger_id,
-        view: translateTransResultView({ original: textToTranslate, translated, targetCode: 'en' }),
+        view: translateTransResultView({ original: textToTranslate, translated, targetCode }),
       });
 
     // ── ed recap ───────────────────────────────────────────────────────────
@@ -903,7 +917,7 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
 
       if (action === 'add') {
         const ids = rest.join(' ').match(/<@([A-Z0-9]+)(?:\|[^>]+)?>/g);
-        if (!ids?.length) { await reply('❌ Usage: `/ed viewers add @alice @bob`'); return; }
+        if (!ids?.length) { await reply('❌ Usage: `/ed viewers add @user1 @user2`'); return; }
         const parsed = ids.map(m => m.match(/<@([A-Z0-9]+)/)[1]);
         await viewersAdd(command.user_id, command.channel_id, parsed);
         const names = parsed.map(id => `<@${id}>`).join(', ');
@@ -911,7 +925,7 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
 
       } else if (action === 'remove') {
         const match = rest.join(' ').match(/<@([A-Z0-9]+)(?:\|[^>]+)?>/);
-        if (!match) { await reply('❌ Usage: `/ed viewers remove @alice`'); return; }
+        if (!match) { await reply('❌ Usage: `/ed viewers remove @user1`'); return; }
         await viewersRemove(command.user_id, command.channel_id, match[1]);
         await reply(`✅ Removed <@${match[1]}> from your viewers in this channel.`);
 
@@ -925,7 +939,7 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
         await reply('✅ Cleared all viewers for this channel.');
 
       } else {
-        await reply('Usage:\n• `/ed viewers add @alice @bob`\n• `/ed viewers remove @alice`\n• `/ed viewers list`\n• `/ed viewers clear`');
+        await reply('Usage:\n• `/ed viewers add @user1 @user2`\n• `/ed viewers remove @user1`\n• `/ed viewers list`\n• `/ed viewers clear`');
       }
 
     } else if (subcommand === 'newbie') {
@@ -943,7 +957,7 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
         `Run \`/ed send\` to open a modal — write your message, pick a language (optional), and post it translated to this channel.\n` +
         `Or right-click any message → *More message shortcuts* → *Translate & Reply* to reply in thread the same way.\n\n` +
         `*6. Let teammates see your translations*\n` +
-        `Run \`/ed viewers add @alice @bob\` so they privately see what you send (translated) in this channel.\n\n` +
+        `Run \`/ed viewers add @user1 @user2\` so they privately see what you send (translated) in this channel.\n\n` +
         `Run \`/ed\` anytime to see all available commands.\n\n` +
         `📖 *Full setup guide:* <https://ownego.slack.com/docs/T024TKZ7R/F0BDWRBA8LR|View the Slack canvas>`
       );
