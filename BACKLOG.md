@@ -1,29 +1,20 @@
 # Backlog
 
-## 🔴 `/ed recap` not working on mobile
+## ✅ `/ed recap` not working on mobile — fixed
 
-**Problem:** The recap command returns no visible response on mobile Slack, despite working on desktop.
+**Root cause:** Switching to Bolt's `respond()` didn't actually fix anything — ephemeral responses sent via `response_url` use the exact same client-session delivery as `chat.postEphemeral`. Both are only ever delivered to whichever client is "active" at the moment Slack pushes them, so a stale/backgrounded mobile session can miss them entirely.
 
-**What's been tried:**
-- Switched from `chat.postEphemeral` to Bolt's `respond()` (uses `response_url`) — still not working
-- Hypothesis was timing: recap is slow (history fetch + name lookups + translations), ephemeral gets dropped by the time it's sent
-
-**Next steps to investigate:**
-- Check server logs to confirm the command is actually reaching the bot and completing without error
-- Try responding with a plain `respond({ text })` first (no translation, no API calls) to isolate whether the issue is delivery or processing
-- Consider sending the result as a direct `chat.postMessage` to the user's DM instead of an ephemeral — this is persistent and cross-device, which fits the use case anyway
-- Check if the bot has the correct OAuth scopes on mobile (`chat:write`, `channels:history`, `groups:history`, `im:history`)
+**Fix:** `/ed recap` now always delivers its result via a persistent DM (`chat.postMessage` to the user), not an ephemeral. DMs are stored and sync across every device, which is exactly what recap needs. If the command was run in a channel, a short ephemeral note points the user to their DMs.
 
 ---
 
-## 🟡 `/ed send` should open a modal
+## ✅ `/ed send` opens a modal — done
 
-**Problem:** `/ed send [message]` requires the user to type their message inline in the command box, which is limiting (no rich text, no formatting, easy to mistype).
+`/ed send` now opens the same rich-text modal used by the "Translate & Reply" thread shortcut (`translateReplyModalView`), instead of requiring the message to be typed inline in the command box. Opened via `client.views.open({ trigger_id: command.trigger_id, ... })`.
 
-**Desired behaviour:** Running `/ed send` (with or without text) should open a modal identical to the "Translate & Reply" modal used in thread shortcuts — with a rich text input and an optional target language field. On submit, it posts the translated message to the current channel (same as the current `/ed send` behaviour).
+- Run inside a thread → modal title reads "Translate & Reply" and the reply goes to that thread (via `command.thread_ts`)
+- Run at the top level of a channel or DM → modal title reads "Translate & Send" and posts to the channel root
+- The optional language field in the modal replaces the old `/ed send [language]` "set default" shortcut and the `lang:` prefix override — both are removed since the modal covers the same need per-send
+- The per-channel `CHANNEL_LANGUAGES` env fallback is preserved and now lives in the shared modal-submit handler, used by both `/ed send` and the thread reply shortcut
 
-**Implementation notes:**
-- Slash commands receive a `trigger_id` in the payload — use `client.views.open({ trigger_id, view: ... })` to open the modal
-- Reuse or extend `translateReplyModalView(channelId, threadTs)` — need a variant that targets the channel root (no thread) for non-thread sends
-- The modal submit handler (`translate_reply_modal`) already handles posting; may need a separate `callback_id` (e.g. `send_modal`) to distinguish channel-post vs thread-reply behaviour, or pass context via `private_metadata`
-- If `/ed send` is called with inline text already (e.g. `/ed send Hello`), decide whether to: (a) ignore the inline text and always open modal, or (b) pre-populate the modal input with the inline text
+**Trade-off to be aware of:** the previous `/ed send [language]` command that set a *persistent* default outgoing language for a user+channel is gone — there's no replacement for "always default to X without picking it each time." If that's missed, worth adding back as a separate `/ed lang-out [language]` command.
