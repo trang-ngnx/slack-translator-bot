@@ -19,6 +19,7 @@ const KEYS = {
   monitoredChannels:      'monitored_channels',
   userIncomingLang:       'user_incoming_lang',
   userTokens:             'user_tokens',   // hash: userId → user OAuth token
+  channelOutgoingLang:    'channel_outgoing_lang', // hash: channelId → language code
 };
 
 // Per-user per-channel translation viewers (Redis set per key)
@@ -79,6 +80,17 @@ async function hashDel(key, field)        { await redis.hdel(key, field); }
 async function seedFromEnv() {
   await seedSet(KEYS.subscribers,       process.env.SUBSCRIBER_USER_IDS);
   await seedSet(KEYS.monitoredChannels, process.env.MONITORED_CHANNEL_IDS);
+}
+
+// One-time migration/seed: CHANNEL_LANGUAGES env var → Redis, so existing
+// config isn't lost. Only fills in channels not already set in Redis — once
+// someone picks a language from the Home tab, that value is the source of
+// truth and this won't overwrite it on the next restart.
+async function seedChannelLanguagesFromEnv() {
+  for (const [channelId, lang] of Object.entries(CHANNEL_LANGUAGES)) {
+    const existing = await hashGet(KEYS.channelOutgoingLang, channelId);
+    if (!existing) await hashSet(KEYS.channelOutgoingLang, channelId, getLangCode(lang));
+  }
 }
 
 // ── User token helpers ─────────────────────────────────────────────────────
@@ -698,7 +710,7 @@ async function buildHomeView(client, userId) {
     }] : []),
     { type: 'divider' },
     { type: 'header', text: { type: 'plain_text', text: '📡 Watched Channels', emoji: true } },
-    { type: 'context', elements: [{ type: 'mrkdwn', text: 'Channels are watched automatically as soon as the bot is added — no setup needed. "Mute for me" stops translations from a channel for you personally without affecting other subscribers.' }] },
+    { type: 'context', elements: [{ type: 'mrkdwn', text: 'Channels are watched automatically as soon as the bot is added — no setup needed. "Mute for me" stops translations from a channel for you personally without affecting other subscribers. The outgoing language applies to everyone using `/ed send` here.' }] },
   ];
 
   if (!myChannels.length) {
@@ -717,6 +729,31 @@ async function buildHomeView(client, userId) {
           text: { type: 'plain_text', text: muted ? 'Unmute for me' : 'Mute for me' },
           action_id: 'home_toggle_mute',
           value: `${muted ? 'unmute' : 'mute'}:${channel.id}`,
+        },
+      });
+
+      // Outgoing language for /ed send in this channel — shared across everyone
+      // who sends there, same as /ed watch itself. Stored in Redis so picking
+      // one here takes effect immediately, no redeploy required.
+      const channelLangCode = getLangCode(
+        (await hashGet(KEYS.channelOutgoingLang, channel.id)) || CHANNEL_LANGUAGES[channel.id] || DEFAULT_OUTGOING_LANG
+      );
+      const channelKnownCode = Object.values(LANG_CODES).includes(channelLangCode);
+      blocks.push({
+        type: 'section',
+        block_id: `channel_lang:${channel.id}`,
+        text: { type: 'mrkdwn', text: `Outgoing language for \`/ed send\` here:` },
+        accessory: {
+          type: 'static_select',
+          action_id: 'home_set_channel_lang',
+          ...(channelKnownCode ? { initial_option: {
+            text: { type: 'plain_text', text: langDisplayName(channelLangCode) },
+            value: channelLangCode,
+          } } : {}),
+          options: Object.entries(LANG_CODES).map(([name, code]) => ({
+            text: { type: 'plain_text', text: name.charAt(0).toUpperCase() + name.slice(1) },
+            value: code,
+          })),
         },
       });
     }
@@ -1384,6 +1421,7 @@ app.view('translate_reply_modal', async ({ view, ack, client, body, logger }) =>
 
     let targetCode = langInput ? getLangCode(langInput) : null;
     if (!targetCode) targetCode = await detectChannelLanguage(client, channelId);
+    if (!targetCode) targetCode = await hashGet(KEYS.channelOutgoingLang, channelId);
     if (!targetCode) targetCode = getLangCode(CHANNEL_LANGUAGES[channelId] || DEFAULT_OUTGOING_LANG);
 
     // Translate each text element individually — preserves bold/italic/strike structure
@@ -1559,6 +1597,20 @@ app.action('home_toggle_mute', async ({ ack, body, client, logger }) => {
   }
 });
 
+// ── App Home: set a channel's outgoing language for /ed send ───────────────
+app.action('home_set_channel_lang', async ({ ack, body, client, logger }) => {
+  await ack();
+  try {
+    const userId = body.user.id;
+    const channelId = body.actions[0].block_id.split(':')[1];
+    const selectedCode = body.actions[0].selected_option.value;
+    await hashSet(KEYS.channelOutgoingLang, channelId, selectedCode);
+    await publishHomeView(client, userId, logger);
+  } catch (err) {
+    logger.error('Error in home_set_channel_lang:', err);
+  }
+});
+
 // ── App Home: link-out button — no-op, just needs to be acknowledged ───────
 app.action('home_open_canvas', async ({ ack }) => { await ack(); });
 
@@ -1612,6 +1664,7 @@ app.action('home_viewers_clear', async ({ ack, body, client, logger }) => {
 // ── Start ──────────────────────────────────────────────────────────────────
 (async () => {
   await seedFromEnv();
+  await seedChannelLanguagesFromEnv();
   const port = process.env.PORT || 3000;
   await app.start(port);
   const addedCount = await syncWatchedChannelsFromMembership(app.client);

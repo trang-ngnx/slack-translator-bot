@@ -78,7 +78,7 @@ In your app settings → **Slash Commands** → **Create New Command**:
    - `SLACK_SIGNING_SECRET`
    - `SUBSCRIBER_USER_IDS` — comma-separated Slack user IDs to seed as initial subscribers (users can also self-register with `/ed join`)
    - `MONITORED_CHANNEL_IDS`
-   - `CHANNEL_LANGUAGES` (optional — e.g. `{"C012AB3CD":"Japanese"}`)
+   - `CHANNEL_LANGUAGES` (optional — e.g. `{"C012AB3CD":"Japanese"}`) — one-time seed only; once set, it's stored in Redis and from then on can be changed live from the Home tab's Watched Channels section instead
    - `OUTGOING_LANGUAGE` (optional, default: English)
    - `PROTECTED_TERMS` (optional — comma-separated brand/product/person names that should never be translated, e.g. `YourBrand,ClientName`)
    - `CANVAS_URL` (optional — link to an internal onboarding canvas/doc; shown in `/ed newbie` and the Home tab if set, omitted otherwise)
