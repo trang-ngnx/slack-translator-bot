@@ -552,7 +552,7 @@ app.event('message', async ({ event, client, logger }) => {
 app.command('/ed', async ({ command, ack, client, logger }) => {
   await ack();
 
-  const USAGE = 'Available commands:\n• `/ed join` — subscribe to auto-translations\n• `/ed leave` — unsubscribe\n• `/ed lang [language]` — set your preferred incoming translation language\n• `/ed watch` — monitor this channel\n• `/ed unwatch` — stop monitoring this channel\n• `/ed dm-watch @user` — monitor DMs from a user sent to the bot\n• `/ed dm-unwatch @user` — stop monitoring\n• `/ed send` — open a modal to compose, translate, and post a message (replies in-thread if run inside a thread)\n• `/ed send [language] [link or text]` — skip the modal and post directly\n• `/ed trans` — open a modal to translate a message or Slack link privately\n• `/ed trans [link or text]` — skip straight to the result popup (defaults to your `/ed lang` setting)\n• `/ed trans [language] [link or text]` — same, but override with a specific language\n• `/ed recap [N]` — DM you the last N translated messages here (default 10; works in DMs, channels, and threads)\n• `/ed recap [message link]` — DM you the full translated thread for a specific message (paste a Slack message link)\n• `/ed viewers add @user1 @user2` — let colleagues privately see your translations here\n• `/ed viewers remove @user1` | `list` | `clear`\n• `/ed login` — authorize so your messages send without the "App" badge\n• `/ed logout` — remove your authorization';
+  const USAGE = 'Available commands:\n• `/ed join` — subscribe to auto-translations\n• `/ed leave` — unsubscribe\n• `/ed lang [language]` — set your preferred incoming translation language\n• `/ed watch` — monitor this channel\n• `/ed unwatch` — stop monitoring this channel\n• `/ed dm-watch @user` — monitor DMs from a user sent to the bot\n• `/ed dm-unwatch @user` — stop monitoring\n• `/ed send` — open a modal to compose, translate, and post a message (replies in-thread if run inside a thread)\n• `/ed send [language] [link or text]` — skip the modal and post directly\n• `/ed trans` — translate privately (opens an input modal in DMs; shows usage in channels)\n• `/ed trans [link or text]` — translate privately (defaults to your `/ed lang` setting) — result pops up as a modal in DMs, or an ephemeral reply in channels/threads\n• `/ed trans [language] [link or text]` — same, but override with a specific language\n• `/ed recap [N]` — DM you the last N translated messages here (default 10; works in DMs, channels, and threads)\n• `/ed recap [message link]` — DM you the full translated thread for a specific message (paste a Slack message link)\n• `/ed viewers add @user1 @user2` — let colleagues privately see your translations here\n• `/ed viewers remove @user1` | `list` | `clear`\n• `/ed login` — authorize so your messages send without the "App" badge\n• `/ed logout` — remove your authorization';
 
   const isDM = command.channel_id.startsWith('D');
   async function reply(text) {
@@ -731,11 +731,17 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
       });
 
     } else if (subcommand === 'trans') {
+      // Modal is DM-only (that's where ephemeral delivery is unreliable); in a
+      // channel — top-level or inside a thread — keep the original ephemeral reply.
       if (!args) {
-        await client.views.open({
-          trigger_id: command.trigger_id,
-          view: translateTransModalView(),
-        });
+        if (isDM) {
+          await client.views.open({
+            trigger_id: command.trigger_id,
+            view: translateTransModalView(),
+          });
+        } else {
+          await reply('❌ Usage:\n• `/ed trans [Slack message link]` — translate a message by link\n• `/ed trans [any text]` — translate text directly\n• `/ed trans [language] [link or text]` — translate to a specific language');
+        }
         return;
       }
 
@@ -766,10 +772,22 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
 
       const targetCode = getLangCode(targetLabel);
       const translated = await translate(textToTranslate, targetLabel);
-      await client.views.open({
-        trigger_id: command.trigger_id,
-        view: translateTransResultView({ original: textToTranslate, translated, targetCode }),
-      });
+
+      if (isDM) {
+        await client.views.open({
+          trigger_id: command.trigger_id,
+          view: translateTransResultView({ original: textToTranslate, translated, targetCode }),
+        });
+      } else {
+        // Ephemeral in the thread if run from inside one, otherwise a plain
+        // channel ephemeral — matches the original pre-modal /ed trans behavior.
+        await client.chat.postEphemeral({
+          channel: command.channel_id,
+          user: command.user_id,
+          ...(command.thread_ts ? { thread_ts: command.thread_ts } : {}),
+          text: `🌐 *Translation (→ ${targetCode})* — only you see this:\n*Original:* ${textToTranslate}\n${translated}`,
+        });
+      }
 
     // ── ed recap ───────────────────────────────────────────────────────────
     } else if (subcommand === 'recap') {
