@@ -85,6 +85,14 @@ async function getUserToken(userId) {
   return hashGet(KEYS.userTokens, userId);
 }
 
+// Encode userId in state directly — avoids Redis timing issues
+function buildOAuthUrl(userId) {
+  const nonce = Math.random().toString(36).slice(2);
+  const state = Buffer.from(`${userId}:${nonce}`).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+  const redirectUri = encodeURIComponent(process.env.SLACK_OAUTH_REDIRECT_URI);
+  return `https://slack.com/oauth/v2/authorize?client_id=${process.env.SLACK_CLIENT_ID}&user_scope=chat:write&redirect_uri=${redirectUri}&state=${state}`;
+}
+
 // Returns a WebClient using the user's own token if available, otherwise bot token
 async function clientFor(userId) {
   const userToken = await getUserToken(userId);
@@ -221,6 +229,9 @@ receiver.router.get('/oauth/callback', async (req, res) => {
       channel: userId,
       text: '✅ *You\'re all set!* Your messages will now be sent directly from you — no more "App" badge.',
     });
+
+    // Refresh their Home tab so it reflects "Authorized" without a manual reload
+    await publishHomeView(app.client, userId, console);
 
     res.send('<p>✅ Authorization successful! You can close this tab and return to Slack.</p>');
   } catch (err) {
@@ -596,6 +607,7 @@ function viewersModalView(channelId, currentViewerIds) {
 }
 
 async function buildHomeView(client, userId) {
+  const isAuthorized = !!(await getUserToken(userId));
   const isSubscribed = await setHas(KEYS.subscribers, userId);
   const currentLangCode = getLangCode(await hashGet(KEYS.userIncomingLang, userId) || 'en');
 
@@ -616,6 +628,20 @@ async function buildHomeView(client, userId) {
 
   const blocks = [
     { type: 'header', text: { type: 'plain_text', text: '⚙️ Ed Translator Settings', emoji: true } },
+    {
+      type: 'section',
+      text: { type: 'mrkdwn', text: isAuthorized
+        ? '🔑 *Authorized* — your messages send as you, with no "App" badge.'
+        : '🔑 *Not authorized* — messages currently send via the bot with your name and avatar.' },
+      accessory: {
+        type: 'button',
+        text: { type: 'plain_text', text: isAuthorized ? 'Log out' : 'Authorize', emoji: true },
+        style: isAuthorized ? 'danger' : 'primary',
+        action_id: 'home_toggle_login',
+        value: isAuthorized ? 'logout' : 'login',
+      },
+    },
+    { type: 'divider' },
     {
       type: 'section',
       text: { type: 'mrkdwn', text: isSubscribed
@@ -794,12 +820,7 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
         await reply('✅ You\'re already authorized. Your messages are sent directly from you.\nUse `/ed logout` to remove authorization.');
         return;
       }
-      // Encode userId in state directly — avoids Redis timing issues
-      const nonce = Math.random().toString(36).slice(2);
-      const state = Buffer.from(`${command.user_id}:${nonce}`).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
-
-      const redirectUri = encodeURIComponent(process.env.SLACK_OAUTH_REDIRECT_URI);
-      const authUrl = `https://slack.com/oauth/v2/authorize?client_id=${process.env.SLACK_CLIENT_ID}&user_scope=chat:write&redirect_uri=${redirectUri}&state=${state}`;
+      const authUrl = buildOAuthUrl(command.user_id);
 
       await client.chat.postMessage({
         channel: command.user_id,
@@ -1383,6 +1404,31 @@ app.view('translate_trans_modal', async ({ view, ack, client, body, logger }) =>
 app.event('app_home_opened', async ({ event, client, logger }) => {
   if (event.tab !== 'home') return;
   await publishHomeView(client, event.user, logger);
+});
+
+// ── App Home: authorize/log out toggle ──────────────────────────────────────
+app.action('home_toggle_login', async ({ ack, body, client, logger }) => {
+  await ack();
+  try {
+    const userId = body.user.id;
+    const action = body.actions[0].value;
+
+    if (action === 'logout') {
+      await hashDel(KEYS.userTokens, userId);
+      await publishHomeView(client, userId, logger);
+      return;
+    }
+
+    // login: send the OAuth link via DM, same as /ed login — the Home view
+    // itself won't flip to "Authorized" until the OAuth callback completes
+    const authUrl = buildOAuthUrl(userId);
+    await client.chat.postMessage({
+      channel: userId,
+      text: `🔑 *Authorize the translator to post as you*\n\nClick the link below — it only asks for permission to post messages on your behalf:\n\n<${authUrl}|Click here to authorize>\n\nThis link expires in 10 minutes.`,
+    });
+  } catch (err) {
+    logger.error('Error in home_toggle_login:', err);
+  }
 });
 
 // ── App Home: subscribe/unsubscribe toggle ──────────────────────────────────
