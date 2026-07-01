@@ -971,8 +971,13 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
       if (linkMatch) {
         const linkedChannelId = linkMatch[1];
         const ts = `${linkMatch[2]}.${linkMatch[3]}`;
-        const linkResult = await client.conversations.history({ channel: linkedChannelId, latest: ts, inclusive: true, limit: 1 });
-        const linkedMessage = linkResult.messages?.[0];
+        let linkedMessage;
+        try {
+          const linkResult = await client.conversations.history({ channel: linkedChannelId, latest: ts, inclusive: true, limit: 1 });
+          linkedMessage = linkResult.messages?.[0];
+        } catch (_) {
+          linkedMessage = null;
+        }
         if (!linkedMessage?.text) {
           await reply('❌ Could not fetch that message. Make sure the bot is invited to that channel.');
           return;
@@ -1058,8 +1063,13 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
       if (match) {
         const channelId = match[1];
         const ts = `${match[2]}.${match[3]}`;
-        const result = await client.conversations.history({ channel: channelId, latest: ts, inclusive: true, limit: 1 });
-        const message = result.messages?.[0];
+        let message;
+        try {
+          const result = await client.conversations.history({ channel: channelId, latest: ts, inclusive: true, limit: 1 });
+          message = result.messages?.[0];
+        } catch (_) {
+          message = null;
+        }
         if (!message?.text) {
           await reply('❌ Could not fetch that message. Make sure the bot is invited to that channel.\n\nTip: for DM messages, copy the text directly and use `/ed trans [paste text]` instead.');
           return;
@@ -1446,8 +1456,13 @@ app.view('translate_trans_modal', async ({ view, ack, client, body, logger }) =>
     if (match) {
       const channelId = match[1];
       const ts = `${match[2]}.${match[3]}`;
-      const result = await client.conversations.history({ channel: channelId, latest: ts, inclusive: true, limit: 1 });
-      const message = result.messages?.[0];
+      let message;
+      try {
+        const result = await client.conversations.history({ channel: channelId, latest: ts, inclusive: true, limit: 1 });
+        message = result.messages?.[0];
+      } catch (_) {
+        message = null;
+      }
       if (!message?.text) {
         await ack({ response_action: 'errors', errors: { text_block: 'Could not fetch that message. Make sure the bot is invited to that channel.' } });
         return;
