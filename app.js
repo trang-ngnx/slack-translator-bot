@@ -4,6 +4,7 @@ const { WebClient } = require('@slack/web-api');
 const https = require('https');
 const http = require('http');
 const Redis = require('ioredis');
+const nlp = require('compromise');
 
 // ── Config ─────────────────────────────────────────────────────────────────
 const CHANNEL_LANGUAGES = JSON.parse(process.env.CHANNEL_LANGUAGES || '{}');
@@ -212,6 +213,18 @@ const PROTECT_PATTERNS = [
     : []),
 ];
 
+// Auto-detect brand/person names via POS tagging rather than a naive
+// "capitalized word" check — compromise resolves the sentence-initial
+// ambiguity (e.g. "Welcome"/"Congratulations"/"Thanks" are recognized as
+// common words, not names, even capitalized at position zero) using its own
+// lexicon + context rules, which a hand-rolled stopword list can't cover.
+function detectProperNouns(text) {
+  const terms = nlp(text).match('#ProperNoun+').out('array');
+  return terms
+    .map(t => t.replace(/^[^\w]+|[^\w]+$/g, ''))  // strip stray leading/trailing punctuation
+    .filter(Boolean);
+}
+
 function protect(text) {
   const stash = [];
   let result = text;
@@ -219,6 +232,17 @@ function protect(text) {
     result = result.replace(pattern, (match) => {
       stash.push(match);
       return `<!--z${stash.length - 1}-->`;  // HTML comments are never touched by Google Translate
+    });
+  }
+  // Run proper-noun detection only after Slack entities (@mentions, #channels,
+  // code, emoji) and PROTECTED_TERMS are already masked out above — this keeps
+  // Slack's native @user/#channel mention/tagging behavior completely untouched;
+  // the tagger never even sees that raw syntax, just an opaque placeholder.
+  for (const term of detectProperNouns(result)) {
+    const re = new RegExp(`\\b${escapeRegex(term)}\\b`, 'g');
+    result = result.replace(re, (match) => {
+      stash.push(match);
+      return `<!--z${stash.length - 1}-->`;
     });
   }
   return { masked: result, stash };

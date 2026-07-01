@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@slack/bolt": "^3.19.0",
+    "compromise": "^14.15.1",
     "dotenv": "^16.4.5",
     "ioredis": "^5.3.2"
   },
