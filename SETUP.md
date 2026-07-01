@@ -80,7 +80,8 @@ In your app settings → **Slash Commands** → **Create New Command**:
    - `MONITORED_CHANNEL_IDS`
    - `CHANNEL_LANGUAGES` (optional — e.g. `{"C012AB3CD":"Japanese"}`)
    - `OUTGOING_LANGUAGE` (optional, default: English)
-   - `PROTECTED_TERMS` (optional — comma-separated brand/product/person names that should never be translated, e.g. `Papabubble,Ownego`)
+   - `PROTECTED_TERMS` (optional — comma-separated brand/product/person names that should never be translated, e.g. `YourBrand,ClientName`)
+   - `CANVAS_URL` (optional — link to an internal onboarding canvas/doc; shown in `/ed newbie` and the Home tab if set, omitted otherwise)
 4. Railway auto-deploys. Go to **Settings → Networking → Generate Domain** to get your URL
 5. **Go back to Steps 2 & 3** and paste your Railway URL into Slack's Event Subscriptions and Slash Command request URLs
 

@@ -9,7 +9,7 @@ const nlp = require('compromise');
 // ── Config ─────────────────────────────────────────────────────────────────
 const CHANNEL_LANGUAGES = JSON.parse(process.env.CHANNEL_LANGUAGES || '{}');
 const DEFAULT_OUTGOING_LANG = process.env.OUTGOING_LANGUAGE || 'English';
-const CANVAS_URL = 'https://ownego.slack.com/docs/T024TKZ7R/F0BDWRBA8LR';
+const CANVAS_URL = process.env.CANVAS_URL || '';
 
 // ── Redis persistent store ─────────────────────────────────────────────────
 const redis = new Redis(process.env.REDIS_URL);
@@ -303,7 +303,7 @@ function escapeRegex(str) {
 }
 
 // Brand names, product names, or person names that must never be translated —
-// configured via PROTECTED_TERMS (comma-separated, case-insensitive, e.g. "Papabubble,Ownego").
+// configured via PROTECTED_TERMS (comma-separated, case-insensitive, e.g. "YourBrand,ClientName").
 const PROTECTED_TERMS = (process.env.PROTECTED_TERMS || '')
   .split(',').map(s => s.trim()).filter(Boolean);
 
@@ -686,7 +686,7 @@ async function buildHomeView(client, userId) {
         '• *Receive translations* — subscribe above and join a watched channel; new messages there are privately translated for you.\n' +
         '• *Send translated messages* — run `/ed send` (opens a modal) to write in your own language and post it translated into a channel. For a quick private translation without posting, use `/ed trans`.' },
     },
-    {
+    ...(CANVAS_URL ? [{
       type: 'section',
       text: { type: 'mrkdwn', text: '📖 Want the full walkthrough?' },
       accessory: {
@@ -695,7 +695,7 @@ async function buildHomeView(client, userId) {
         url: CANVAS_URL,
         action_id: 'home_open_canvas',
       },
-    },
+    }] : []),
     { type: 'divider' },
     { type: 'header', text: { type: 'plain_text', text: '📡 Watched Channels', emoji: true } },
     { type: 'context', elements: [{ type: 'mrkdwn', text: 'Channels are watched automatically as soon as the bot is added — no setup needed. "Mute for me" stops translations from a channel for you personally without affecting other subscribers.' }] },
@@ -1281,8 +1281,8 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
         `Run \`/ed viewers add @user1 @user2\`, or manage viewers directly from the *Viewers* section in your Home tab.\n\n` +
         `*5. Catch up on missed translations*\n` +
         `Run \`/ed recap\` to get your last several messages here, translated, sent straight to your DMs — works in channels, threads, and DMs alike. Paste a specific Slack message link (\`/ed recap [link]\`) to recap that exact thread instead, from anywhere.\n\n` +
-        `Run \`/ed\` anytime to see all available commands.\n\n` +
-        `📖 *Full setup guide:* <${CANVAS_URL}|View the Slack canvas>`
+        `Run \`/ed\` anytime to see all available commands.` +
+        (CANVAS_URL ? `\n\n📖 *Full setup guide:* <${CANVAS_URL}|View the Slack canvas>` : '')
       );
 
     } else if (!subcommand) {
