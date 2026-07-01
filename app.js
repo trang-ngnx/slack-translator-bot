@@ -9,6 +9,7 @@ const nlp = require('compromise');
 // ── Config ─────────────────────────────────────────────────────────────────
 const CHANNEL_LANGUAGES = JSON.parse(process.env.CHANNEL_LANGUAGES || '{}');
 const DEFAULT_OUTGOING_LANG = process.env.OUTGOING_LANGUAGE || 'English';
+const CANVAS_URL = 'https://ownego.slack.com/docs/T024TKZ7R/F0BDWRBA8LR';
 
 // ── Redis persistent store ─────────────────────────────────────────────────
 const redis = new Redis(process.env.REDIS_URL);
@@ -578,53 +579,28 @@ function langDisplayName(code) {
   return name.charAt(0).toUpperCase() + name.slice(1);
 }
 
-function viewersModalView(channelId, currentViewerIds) {
-  const element = {
-    type: 'multi_users_select',
-    action_id: 'viewers_input',
-    placeholder: { type: 'plain_text', text: 'Select teammates' },
-  };
-  if (currentViewerIds.length) element.initial_users = currentViewerIds;
-
-  return {
-    type: 'modal',
-    callback_id: 'home_viewers_modal',
-    private_metadata: JSON.stringify({ channelId }),
-    title: { type: 'plain_text', text: 'Manage Viewers' },
-    submit: { type: 'plain_text', text: 'Save' },
-    close: { type: 'plain_text', text: 'Cancel' },
-    blocks: [
-      { type: 'section', text: { type: 'mrkdwn', text: `Choose who can privately see your translations in <#${channelId}>.` } },
-      {
-        type: 'input',
-        block_id: 'viewers_block',
-        optional: true,
-        label: { type: 'plain_text', text: 'Viewers' },
-        element,
-      },
-    ],
-  };
-}
-
-async function buildHomeView(client, userId) {
-  const isAuthorized = !!(await getUserToken(userId));
-  const isSubscribed = await setHas(KEYS.subscribers, userId);
-  const currentLangCode = getLangCode(await hashGet(KEYS.userIncomingLang, userId) || 'en');
-
+// Channels the given user belongs to that are also currently watched —
+// shared by both the Watched Channels and Viewers sections below.
+async function getMyWatchedChannels(client, userId) {
   const watchedChannels = await setAll(KEYS.monitoredChannels);
-  let myChannels = [];
   try {
     const result = await client.users.conversations({
       user: userId,
       types: 'public_channel,private_channel',
       limit: 200,
     });
-    myChannels = (result.channels || []).filter(c => watchedChannels.has(c.id));
+    return (result.channels || []).filter(c => watchedChannels.has(c.id));
   } catch (_) {
-    // Falls back to an empty list — the section below explains why if this happens.
+    return [];
   }
+}
 
+async function buildHomeView(client, userId) {
+  const isAuthorized = !!(await getUserToken(userId));
+  const isSubscribed = await setHas(KEYS.subscribers, userId);
+  const currentLangCode = getLangCode(await hashGet(KEYS.userIncomingLang, userId) || 'en');
   const knownCode = Object.values(LANG_CODES).includes(currentLangCode);
+  const myChannels = await getMyWatchedChannels(client, userId);
 
   const blocks = [
     { type: 'header', text: { type: 'plain_text', text: '⚙️ Ed Translator Settings', emoji: true } },
@@ -641,7 +617,6 @@ async function buildHomeView(client, userId) {
         value: isAuthorized ? 'logout' : 'login',
       },
     },
-    { type: 'divider' },
     {
       type: 'section',
       text: { type: 'mrkdwn', text: isSubscribed
@@ -671,6 +646,23 @@ async function buildHomeView(client, userId) {
         })),
       },
     },
+    {
+      type: 'section',
+      text: { type: 'mrkdwn', text:
+        '*How to use Ed:*\n' +
+        '• *Receive translations* — subscribe above and join a watched channel; new messages there are privately translated for you.\n' +
+        '• *Send translated messages* — run `/ed send` (opens a modal) to write in your own language and post it translated into a channel. For a quick private translation without posting, use `/ed trans`.' },
+    },
+    {
+      type: 'section',
+      text: { type: 'mrkdwn', text: '📖 Want the full walkthrough?' },
+      accessory: {
+        type: 'button',
+        text: { type: 'plain_text', text: 'Open Canvas', emoji: true },
+        url: CANVAS_URL,
+        action_id: 'home_open_canvas',
+      },
+    },
     { type: 'divider' },
     { type: 'header', text: { type: 'plain_text', text: '📡 Watched Channels', emoji: true } },
   ];
@@ -687,15 +679,52 @@ async function buildHomeView(client, userId) {
         type: 'section',
         text: { type: 'mrkdwn', text: `${muted ? '🔕' : '🔔'} <#${channel.id}>${muted ? ' _(muted for you)_' : ''}` },
         accessory: {
-          type: 'overflow',
-          action_id: 'home_channel_menu',
-          options: [
-            muted
-              ? { text: { type: 'plain_text', text: 'Unmute for me' }, value: `unmute:${channel.id}` }
-              : { text: { type: 'plain_text', text: 'Mute for me' }, value: `mute:${channel.id}` },
-            { text: { type: 'plain_text', text: 'Manage viewers' }, value: `viewers:${channel.id}` },
-          ],
+          type: 'button',
+          text: { type: 'plain_text', text: muted ? 'Unmute for me' : 'Mute for me' },
+          action_id: 'home_toggle_mute',
+          value: `${muted ? 'unmute' : 'mute'}:${channel.id}`,
         },
+      });
+    }
+  }
+
+  blocks.push(
+    { type: 'divider' },
+    { type: 'header', text: { type: 'plain_text', text: '👥 Viewers', emoji: true } },
+  );
+
+  if (!myChannels.length) {
+    blocks.push({
+      type: 'section',
+      text: { type: 'mrkdwn', text: '_Viewers let colleagues privately see the translations you send in a channel. Once you\'re in a watched channel, it\'ll show up here._' },
+    });
+  } else {
+    for (const channel of myChannels) {
+      const currentViewers = await viewersList(userId, channel.id);
+      const viewersSection = {
+        type: 'section',
+        text: { type: 'mrkdwn', text: currentViewers.length
+          ? `*<#${channel.id}>* — ${currentViewers.map(id => `<@${id}>`).join(', ')}`
+          : `*<#${channel.id}>* — _no viewers set_` },
+      };
+      if (currentViewers.length) {
+        viewersSection.accessory = {
+          type: 'button',
+          text: { type: 'plain_text', text: 'Clear all' },
+          style: 'danger',
+          action_id: 'home_viewers_clear',
+          value: channel.id,
+        };
+      }
+      blocks.push(viewersSection, {
+        type: 'actions',
+        block_id: `viewers_actions:${channel.id}`,
+        elements: [{
+          type: 'multi_users_select',
+          action_id: 'home_viewers_select',
+          placeholder: { type: 'plain_text', text: 'Add or remove viewers…' },
+          ...(currentViewers.length ? { initial_users: currentViewers } : {}),
+        }],
       });
     }
   }
@@ -1200,7 +1229,7 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
         `*6. Let teammates see your translations*\n` +
         `Run \`/ed viewers add @user1 @user2\` so they privately see what you send (translated) in this channel.\n\n` +
         `Run \`/ed\` anytime to see all available commands.\n\n` +
-        `📖 *Full setup guide:* <https://ownego.slack.com/docs/T024TKZ7R/F0BDWRBA8LR|View the Slack canvas>`
+        `📖 *Full setup guide:* <${CANVAS_URL}|View the Slack canvas>`
       );
 
     } else if (!subcommand) {
@@ -1458,58 +1487,50 @@ app.action('home_set_lang', async ({ ack, body, client, logger }) => {
   }
 });
 
-// ── App Home: per-channel overflow menu (mute/unmute, manage viewers) ──────
-app.action('home_channel_menu', async ({ ack, body, client, logger }) => {
+// ── App Home: mute/unmute a watched channel for yourself ───────────────────
+app.action('home_toggle_mute', async ({ ack, body, client, logger }) => {
   await ack();
   try {
     const userId = body.user.id;
-    const [action, channelId] = body.actions[0].selected_option.value.split(':');
-
-    if (action === 'mute') {
-      await muteChannelForUser(userId, channelId);
-      await publishHomeView(client, userId, logger);
-    } else if (action === 'unmute') {
-      await unmuteChannelForUser(userId, channelId);
-      await publishHomeView(client, userId, logger);
-    } else if (action === 'viewers') {
-      const currentViewers = await viewersList(userId, channelId);
-      await client.views.open({
-        trigger_id: body.trigger_id,
-        view: viewersModalView(channelId, currentViewers),
-      });
-    }
+    const [action, channelId] = body.actions[0].value.split(':');
+    if (action === 'mute') await muteChannelForUser(userId, channelId);
+    else await unmuteChannelForUser(userId, channelId);
+    await publishHomeView(client, userId, logger);
   } catch (err) {
-    logger.error('Error in home_channel_menu:', err);
+    logger.error('Error in home_toggle_mute:', err);
   }
 });
 
-// ── App Home: viewers modal submit ──────────────────────────────────────────
-app.view('home_viewers_modal', async ({ ack, view, body, logger }) => {
-  try {
-    const { channelId } = JSON.parse(view.private_metadata);
-    const userId = body.user.id;
-    const selected = view.state.values.viewers_block.viewers_input.selected_users || [];
+// ── App Home: link-out button — no-op, just needs to be acknowledged ───────
+app.action('home_open_canvas', async ({ ack }) => { await ack(); });
 
+// ── App Home: viewers multi-select — replaces the full set on every change,
+// so adding or removing someone is just changing the selection, no command
+// or modal needed.
+app.action('home_viewers_select', async ({ ack, body, client, logger }) => {
+  await ack();
+  try {
+    const userId = body.user.id;
+    const channelId = body.actions[0].block_id.split(':')[1];
+    const selected = body.actions[0].selected_users || [];
     await viewersClear(userId, channelId);
     if (selected.length) await viewersAdd(userId, channelId, selected);
-
-    await ack({
-      response_action: 'update',
-      view: {
-        type: 'modal',
-        callback_id: 'home_viewers_saved',
-        title: { type: 'plain_text', text: 'Manage Viewers' },
-        close: { type: 'plain_text', text: 'Close' },
-        blocks: [
-          { type: 'section', text: { type: 'mrkdwn', text: selected.length
-            ? `✅ Saved. Viewers for <#${channelId}>: ${selected.map(id => `<@${id}>`).join(', ')}`
-            : `✅ Saved. No viewers set for <#${channelId}>.` } },
-        ],
-      },
-    });
+    await publishHomeView(client, userId, logger);
   } catch (err) {
-    logger.error('Error in home_viewers_modal submit:', err);
-    await ack();
+    logger.error('Error in home_viewers_select:', err);
+  }
+});
+
+// ── App Home: clear all viewers for a channel in one click ─────────────────
+app.action('home_viewers_clear', async ({ ack, body, client, logger }) => {
+  await ack();
+  try {
+    const userId = body.user.id;
+    const channelId = body.actions[0].value;
+    await viewersClear(userId, channelId);
+    await publishHomeView(client, userId, logger);
+  } catch (err) {
+    logger.error('Error in home_viewers_clear:', err);
   }
 });
 
