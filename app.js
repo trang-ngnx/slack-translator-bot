@@ -823,31 +823,16 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
         const messageTs = `${linkMatch[2]}.${linkMatch[3]}`;
         originalLink = args.split(/\s+/).find(w => w.startsWith('http') || w.includes('/archives/')) || null;
 
-        // thread_ts query param is present when the link points to a thread reply
+        // thread_ts query param (present on reply links) points straight at the root.
+        // Without it, messageTs itself works just as well: conversations.replies
+        // accepts the ts of any message in a thread (parent or reply) and returns
+        // the whole thread either way — no need to pre-resolve the root ourselves.
         const threadTsParam = args.match(/[?&]thread_ts=([\d.]+)/)?.[1];
+        const threadTs = threadTsParam || messageTs;
 
         // Count may be passed alongside the link: "/ed recap [link] 15"
         const argsWithoutLink = args.split(/\s+/).filter(w => !w.startsWith('http') && !w.includes('/archives/')).join(' ');
         const count = Math.min(Math.max(parseInt(argsWithoutLink) || 20, 1), 20);
-
-        let threadTs = threadTsParam || null;
-
-        if (!threadTs) {
-          // No thread_ts in URL → the link points to a top-level message.
-          // Fetch it from history to confirm and get its thread_ts if it has one.
-          try {
-            const histResult = await client.conversations.history({
-              channel: targetChannelId,
-              latest: messageTs,
-              inclusive: true,
-              limit: 1,
-            });
-            const msg = histResult.messages?.[0];
-            threadTs = (msg?.ts === messageTs && msg.thread_ts) ? msg.thread_ts : messageTs;
-          } catch (_) {
-            threadTs = messageTs;
-          }
-        }
 
         try {
           const result = await client.conversations.replies({
@@ -907,8 +892,11 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
         }
       };
 
-      const lines = [];
-      for (const msg of rawMessages) {
+      // Translate all messages concurrently rather than one at a time — sequential
+      // Google Translate round-trips (up to 2 per message: detect + translate) for
+      // a full recap could add up to several seconds, which on a slow connection
+      // can look indistinguishable from the command having silently failed.
+      const lines = await Promise.all(rawMessages.map(async (msg) => {
         const senderName = msg.user ? await resolveDisplayName(msg.user) : (msg.username || 'Unknown');
         const timeStr = new Date(parseFloat(msg.ts) * 1000)
           .toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
@@ -922,17 +910,10 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
           }
         } catch (_) {}
 
-        if (translatedText !== msg.text) {
-          lines.push(`*${senderName}* (${timeStr}):\n_${msg.text}_\n→ ${translatedText}`);
-        } else {
-          lines.push(`*${senderName}* (${timeStr}):\n${msg.text}`);
-        }
-      }
-
-      if (!lines.length) {
-        await sendRecapResult('❌ No readable messages found.');
-        return;
-      }
+        return translatedText !== msg.text
+          ? `*${senderName}* (${timeStr}):\n_${msg.text}_\n→ ${translatedText}`
+          : `*${senderName}* (${timeStr}):\n${msg.text}`;
+      }));
 
       const linkLine = originalLink ? `\n${originalLink}` : '';
       await sendRecapResult(`📋 *Last ${lines.length} messages in this ${contextLabel} (→ ${targetCode}):*${linkLine}\n\n${lines.join('\n\n─────\n')}`);
