@@ -446,7 +446,7 @@ function translateTransModalView() {
         type: 'input',
         block_id: 'lang_block',
         label: { type: 'plain_text', text: 'Target language (optional)' },
-        hint: { type: 'plain_text', text: 'e.g. en, ja, vi — leave blank for English' },
+        hint: { type: 'plain_text', text: 'e.g. en, ja, vi — leave blank to use your /ed lang setting' },
         optional: true,
         element: {
           type: 'plain_text_input',
@@ -552,7 +552,7 @@ app.event('message', async ({ event, client, logger }) => {
 app.command('/ed', async ({ command, ack, client, logger }) => {
   await ack();
 
-  const USAGE = 'Available commands:\n• `/ed join` — subscribe to auto-translations\n• `/ed leave` — unsubscribe\n• `/ed lang [language]` — set your preferred incoming translation language\n• `/ed watch` — monitor this channel\n• `/ed unwatch` — stop monitoring this channel\n• `/ed dm-watch @user` — monitor DMs from a user sent to the bot\n• `/ed dm-unwatch @user` — stop monitoring\n• `/ed send` — open a modal to compose, translate, and post a message (replies in-thread if run inside a thread)\n• `/ed send [language] [link or text]` — skip the modal and post directly\n• `/ed trans` — open a modal to translate a message or Slack link privately\n• `/ed trans [link or text]` — skip straight to the result popup (defaults to English)\n• `/ed trans [language] [link or text]` — same, but translate to a specific language\n• `/ed recap [N]` — DM you the last N translated messages here (default 10; works in DMs, channels, and threads)\n• `/ed recap [message link]` — DM you the full translated thread for a specific message (paste a Slack message link)\n• `/ed viewers add @user1 @user2` — let colleagues privately see your translations here\n• `/ed viewers remove @user1` | `list` | `clear`\n• `/ed login` — authorize so your messages send without the "App" badge\n• `/ed logout` — remove your authorization';
+  const USAGE = 'Available commands:\n• `/ed join` — subscribe to auto-translations\n• `/ed leave` — unsubscribe\n• `/ed lang [language]` — set your preferred incoming translation language\n• `/ed watch` — monitor this channel\n• `/ed unwatch` — stop monitoring this channel\n• `/ed dm-watch @user` — monitor DMs from a user sent to the bot\n• `/ed dm-unwatch @user` — stop monitoring\n• `/ed send` — open a modal to compose, translate, and post a message (replies in-thread if run inside a thread)\n• `/ed send [language] [link or text]` — skip the modal and post directly\n• `/ed trans` — open a modal to translate a message or Slack link privately\n• `/ed trans [link or text]` — skip straight to the result popup (defaults to your `/ed lang` setting)\n• `/ed trans [language] [link or text]` — same, but override with a specific language\n• `/ed recap [N]` — DM you the last N translated messages here (default 10; works in DMs, channels, and threads)\n• `/ed recap [message link]` — DM you the full translated thread for a specific message (paste a Slack message link)\n• `/ed viewers add @user1 @user2` — let colleagues privately see your translations here\n• `/ed viewers remove @user1` | `list` | `clear`\n• `/ed login` — authorize so your messages send without the "App" badge\n• `/ed logout` — remove your authorization';
 
   const isDM = command.channel_id.startsWith('D');
   async function reply(text) {
@@ -739,11 +739,12 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
         return;
       }
 
-      // Inline "[language] [link or text]" or plain "[link or text]" (→ English).
-      // A leading word only counts as a language if it's a recognized name/code —
-      // otherwise it's ambiguous with the first word of an ordinary message.
+      // Inline "[language] [link or text]" or plain "[link or text]" (→ your /ed lang
+      // preference). A leading word only counts as a language override if it's a
+      // recognized name/code — otherwise it's ambiguous with the first word of an
+      // ordinary message.
       const [firstToken, ...transRest] = args.split(/\s+/);
-      let targetLabel = 'English';
+      let targetLabel = await hashGet(KEYS.userIncomingLang, command.user_id) || 'en';
       let textToTranslate = args;
       if (transRest.length && KNOWN_LANG_TOKENS.has(firstToken.toLowerCase())) {
         targetLabel = firstToken;
@@ -974,42 +975,6 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
   }
 });
 
-// ── Thread button: "Translate this message" ───────────────────────────────
-app.action('thread_translate_msg', async ({ body, ack, client, logger }) => {
-  await ack();
-  try {
-    const { channelId, threadTs, messageTs } = JSON.parse(body.actions[0].value);
-    const userId = body.user.id;
-
-    const result = await client.conversations.replies({ channel: channelId, ts: threadTs, inclusive: true, limit: 100 });
-    const message = result.messages?.find(m => m.ts === messageTs);
-    if (!message?.text) {
-      await client.chat.postEphemeral({ channel: channelId, user: userId, thread_ts: threadTs, text: '❌ Could not fetch the message.' });
-      return;
-    }
-
-    const targetLang = await hashGet(KEYS.userIncomingLang, userId) || 'en';
-    const translated = await translate(message.text, targetLang);
-
-    // Get sender name for context
-    let senderLabel = '';
-    if (message.user) {
-      const senderInfo = await client.users.info({ user: message.user });
-      const name = senderInfo.user?.profile?.display_name || senderInfo.user?.profile?.real_name;
-      if (name) senderLabel = ` — *${name}*`;
-    }
-
-    await client.chat.postEphemeral({
-      channel: channelId,
-      user: userId,
-      thread_ts: threadTs,
-      text: `🌐 *Translation${senderLabel}* (only you see this):\n${translated}`,
-    });
-  } catch (err) {
-    logger.error('Error in thread_translate_msg:', err);
-  }
-});
-
 // ── Thread button: "Reply with translation" ────────────────────────────────
 app.action('thread_open_reply_modal', async ({ body, ack, client, logger }) => {
   await ack();
@@ -1025,19 +990,29 @@ app.action('thread_open_reply_modal', async ({ body, ack, client, logger }) => {
 app.shortcut('translate_message', async ({ shortcut, ack, client, logger }) => {
   await ack();
   try {
+    const channelId = shortcut.channel?.id;
     const userId = shortcut.user.id;
     const messageText = shortcut.message?.text;
+    const threadTs = shortcut.message?.thread_ts || shortcut.message?.ts;
+    // Ephemeral delivery is unreliable specifically in DM threads, so DMs get a
+    // modal (works via trigger_id regardless of context); channels keep the
+    // original ephemeral-in-thread reply.
+    const isDM = channelId?.startsWith('D');
 
     if (!messageText?.trim()) {
-      await client.views.open({
-        trigger_id: shortcut.trigger_id,
-        view: {
-          type: 'modal',
-          title: { type: 'plain_text', text: 'Translation' },
-          close: { type: 'plain_text', text: 'Close' },
-          blocks: [{ type: 'section', text: { type: 'mrkdwn', text: '❌ This message has no text to translate.' } }],
-        },
-      });
+      if (isDM) {
+        await client.views.open({
+          trigger_id: shortcut.trigger_id,
+          view: {
+            type: 'modal',
+            title: { type: 'plain_text', text: 'Translation' },
+            close: { type: 'plain_text', text: 'Close' },
+            blocks: [{ type: 'section', text: { type: 'mrkdwn', text: '❌ This message has no text to translate.' } }],
+          },
+        });
+      } else {
+        await client.chat.postEphemeral({ channel: channelId, user: userId, text: '❌ This message has no text to translate.' });
+      }
       return;
     }
 
@@ -1045,13 +1020,19 @@ app.shortcut('translate_message', async ({ shortcut, ack, client, logger }) => {
     const targetCode = getLangCode(targetLang);
     const translated = await translate(messageText, targetLang);
 
-    // Open as a modal (via trigger_id) rather than postEphemeral — ephemeral delivery
-    // is unreliable in DM threads specifically, and a modal works regardless of
-    // whether the shortcut was run on a channel message, DM message, or thread reply.
-    await client.views.open({
-      trigger_id: shortcut.trigger_id,
-      view: translateTransResultView({ original: messageText, translated, targetCode }),
-    });
+    if (isDM) {
+      await client.views.open({
+        trigger_id: shortcut.trigger_id,
+        view: translateTransResultView({ original: messageText, translated, targetCode }),
+      });
+    } else {
+      await client.chat.postEphemeral({
+        channel: channelId,
+        user: userId,
+        thread_ts: threadTs,
+        text: `🌐 *Translation (only you see this):*\n${translated}`,
+      });
+    }
   } catch (err) {
     logger.error('Error in translate_message shortcut:', err);
   }
@@ -1131,7 +1112,7 @@ app.view('translate_reply_modal', async ({ view, ack, client, body, logger }) =>
 });
 
 // ── Modal submit: translate & show result in-place ─────────────────────────
-app.view('translate_trans_modal', async ({ view, ack, client, logger }) => {
+app.view('translate_trans_modal', async ({ view, ack, client, body, logger }) => {
   try {
     const textInput = view.state.values.text_block.text_input.value?.trim();
     const langInput = view.state.values.lang_block.lang_input.value?.trim();
@@ -1155,7 +1136,7 @@ app.view('translate_trans_modal', async ({ view, ack, client, logger }) => {
       textToTranslate = message.text;
     }
 
-    const targetLabel = langInput || 'English';
+    const targetLabel = langInput || await hashGet(KEYS.userIncomingLang, body.user.id) || 'en';
     const targetCode = getLangCode(targetLabel);
     const translated = await translate(textToTranslate, targetLabel);
 
