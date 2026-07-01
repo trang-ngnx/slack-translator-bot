@@ -95,6 +95,40 @@ async function postAsUser(botClient, userId, params) {
   return botClient.chat.postMessage(params);
 }
 
+// The bot's own Slack user ID (distinct from bot_id) — used to tell "the bot itself
+// joined a channel" apart from any other member joining. Cached, never changes.
+let ownUserId = null;
+async function getOwnUserId(client) {
+  if (ownUserId) return ownUserId;
+  const auth = await client.auth.test();
+  ownUserId = auth.user_id;
+  return ownUserId;
+}
+
+// Auto-watch every public/private channel the bot is currently a member of —
+// run once at startup so channels the bot was already added to before this
+// feature shipped get picked up too, not just new invites going forward.
+async function syncWatchedChannelsFromMembership(client) {
+  let cursor;
+  let addedCount = 0;
+  do {
+    const result = await client.conversations.list({
+      types: 'public_channel,private_channel',
+      exclude_archived: true,
+      limit: 200,
+      cursor,
+    });
+    for (const channel of result.channels || []) {
+      if (channel.is_member && !(await setHas(KEYS.monitoredChannels, channel.id))) {
+        await setAdd(KEYS.monitoredChannels, channel.id);
+        addedCount++;
+      }
+    }
+    cursor = result.response_metadata?.next_cursor || undefined;
+  } while (cursor);
+  return addedCount;
+}
+
 // Subtypes that are never real conversation content — channel/membership
 // housekeeping and edit/delete markers. Deliberately NOT excluding by bot_id:
 // a shared channel can have real human content relayed through all sorts of
@@ -584,11 +618,23 @@ app.event('message', async ({ event, client, logger }) => {
   }
 });
 
+// ── Auto-watch: monitor a channel automatically when the bot is added to it ──
+app.event('member_joined_channel', async ({ event, client, logger }) => {
+  try {
+    const myUserId = await getOwnUserId(client);
+    if (event.user !== myUserId) return; // only care about the bot itself joining
+    await setAdd(KEYS.monitoredChannels, event.channel);
+    logger.info(`[auto-watch] bot added to ${event.channel} — now monitored`);
+  } catch (err) {
+    logger.error('Error in member_joined_channel handler:', err);
+  }
+});
+
 // ── /ed — single entry point for all commands ─────────────────────────────
 app.command('/ed', async ({ command, ack, client, logger }) => {
   await ack();
 
-  const USAGE = 'Available commands:\n• `/ed join` — subscribe to auto-translations\n• `/ed leave` — unsubscribe\n• `/ed lang [language]` — set your preferred incoming translation language\n• `/ed watch` — monitor this channel\n• `/ed unwatch` — stop monitoring this channel\n• `/ed send` — open a modal to compose, translate, and post a message (replies in-thread if run inside a thread)\n• `/ed send [language] [link or text]` — skip the modal and post directly\n• `/ed trans` — translate privately (opens an input modal in DMs; shows usage in channels)\n• `/ed trans [link or text]` — translate privately (defaults to your `/ed lang` setting) — result pops up as a modal in DMs, or an ephemeral reply in channels/threads\n• `/ed trans [language] [link or text]` — same, but override with a specific language\n• `/ed recap [N]` — DM you the last N translated messages here (default 10; works in DMs, channels, and threads)\n• `/ed recap [message link]` — DM you the full translated thread for a specific message (paste a Slack message link)\n• `/ed viewers add @user1 @user2` — let colleagues privately see your translations here\n• `/ed viewers remove @user1` | `list` | `clear`\n• `/ed login` — authorize so your messages send without the "App" badge\n• `/ed logout` — remove your authorization';
+  const USAGE = 'Available commands:\n• `/ed join` — subscribe to auto-translations\n• `/ed leave` — unsubscribe\n• `/ed lang [language]` — set your preferred incoming translation language\n• `/ed watch` — monitor this channel (also happens automatically when the bot is added to a channel)\n• `/ed unwatch` — stop monitoring this channel\n• `/ed send` — open a modal to compose, translate, and post a message (replies in-thread if run inside a thread)\n• `/ed send [language] [link or text]` — skip the modal and post directly\n• `/ed trans` — translate privately (opens an input modal in DMs; shows usage in channels)\n• `/ed trans [link or text]` — translate privately (defaults to your `/ed lang` setting) — result pops up as a modal in DMs, or an ephemeral reply in channels/threads\n• `/ed trans [language] [link or text]` — same, but override with a specific language\n• `/ed recap [N]` — DM you the last N translated messages here (default 10; works in DMs, channels, and threads)\n• `/ed recap [message link]` — DM you the full translated thread for a specific message (paste a Slack message link)\n• `/ed viewers add @user1 @user2` — let colleagues privately see your translations here\n• `/ed viewers remove @user1` | `list` | `clear`\n• `/ed login` — authorize so your messages send without the "App" badge\n• `/ed logout` — remove your authorization';
 
   const isDM = command.channel_id.startsWith('D');
   async function reply(text) {
@@ -988,7 +1034,7 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
         `*3. Set your language*\n` +
         `Run \`/ed lang Vietnamese\` (or any language) to receive translations in your preferred language.\n\n` +
         `*4. Monitor a channel*\n` +
-        `In the channel you want to watch, run \`/ed watch\`. Every new message there will be privately translated for subscribers.\n\n` +
+        `Channels are watched automatically as soon as the bot is added to them — no extra step needed. Prefer to opt in manually? Run \`/ed watch\` in a channel (and \`/ed unwatch\` to stop). Every new message in a watched channel is privately translated for subscribers.\n\n` +
         `*5. Send translated messages*\n` +
         `Run \`/ed send\` to open a modal — write your message, pick a language (optional), and post it translated to this channel.\n` +
         `Or right-click any message → *More message shortcuts* → *Translate & Reply* to reply in thread the same way.\n\n` +
@@ -1200,6 +1246,8 @@ app.view('translate_trans_modal', async ({ view, ack, client, body, logger }) =>
   await seedFromEnv();
   const port = process.env.PORT || 3000;
   await app.start(port);
+  const addedCount = await syncWatchedChannelsFromMembership(app.client);
+  if (addedCount) console.log(`📡 Auto-watch: picked up ${addedCount} already-joined channel(s)`);
   const channels = await setAll(KEYS.monitoredChannels);
   console.log(`⚡️ Slack Translator Bot is running on port ${port}`);
   console.log(`📡 Monitoring channels: ${[...channels].join(', ') || '(none configured)'}`);

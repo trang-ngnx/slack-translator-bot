@@ -16,6 +16,8 @@
 Add these scopes:
 - `channels:history` — read messages in public channels
 - `groups:history` — read messages in private channels
+- `channels:read` — list public channels the bot has joined (needed for auto-watch)
+- `groups:read` — list private channels the bot has joined (needed for auto-watch)
 - `im:history` — read messages in 1:1 DMs
 - `im:write` — send DM messages (bot DMs you the translation)
 - `chat:write` — post messages
@@ -42,8 +44,10 @@ Add these scopes:
    - ⚠️ Must be `https://`, not `http://`
    - ⚠️ Must include `/slack/events` at the end
    - Come back to fill this after deploying in Step 4
-3. Under **Subscribe to bot events**, add: `message.channels`, `message.groups`, and `message.im`
+3. Under **Subscribe to bot events**, add: `message.channels`, `message.groups`, `message.im`, and `member_joined_channel`
 4. Save changes
+
+> `member_joined_channel` powers auto-watch: any channel the bot is added to is automatically monitored, no `/ed watch` needed. `/ed watch`/`/ed unwatch` still work for manual control.
 
 ---
 
@@ -97,7 +101,7 @@ In each channel you want to monitor or use `/translate` in, type:
 ```
 /invite @My Translator
 ```
-> The bot must be in a channel to read messages from it — this applies to both auto-translation and `/translate` link lookups.
+> The bot must be in a channel to read messages from it — this applies to both auto-translation and `/translate` link lookups. Inviting the bot automatically starts monitoring that channel (see auto-watch above) — no separate `/ed watch` step needed.
 
 ---
 
@@ -110,6 +114,8 @@ In each channel you want to monitor or use `/translate` in, type:
 | Unsubscribe | `/ed leave` |
 
 ### Channel monitoring
+> Channels are watched automatically as soon as the bot is added to them. Use these only for manual control (e.g. to opt a channel out).
+
 | What you want | What to do |
 |---|---|
 | Monitor this channel (run inside the channel) | `/ed watch` |
@@ -126,7 +132,7 @@ In each channel you want to monitor or use `/translate` in, type:
 Anyone in the workspace can use the bot — no setup needed:
 1. Find the bot in Slack (search "INT Translator" or your bot name)
 2. `/ed join` — subscribe to auto-translations
-3. Go to each channel you want monitored → `/ed watch`
+3. Channels are watched automatically once the bot is added — invite it to any channel you want monitored (`/ed watch`/`/ed unwatch` for manual control)
 4. `/ed leave` to unsubscribe anytime
 
 ---
@@ -134,7 +140,7 @@ Anyone in the workspace can use the bot — no setup needed:
 ## Troubleshooting
 
 - **"Your URL didn't respond with the challenge parameter"**: Make sure the URL is `https://` (not `http://`) and ends with `/slack/events`. Also confirm Railway shows the deployment as **Active**.
-- **Bot not translating automatically**: Make sure it's invited to the channel (`/invite @botname`) and the channel ID is in `MONITORED_CHANNEL_IDS`.
+- **Bot not translating automatically**: Make sure it's invited to the channel (`/invite @botname`) — inviting it auto-watches the channel. If it was invited before `member_joined_channel` was added to Event Subscriptions, it won't have been picked up automatically; run `/ed watch` there once, or restart the app (it re-syncs channel membership on every startup).
 - **`/ed trans` says "could not fetch message"**: The bot isn't in that channel — run `/invite @botname` there first.
 - **"dispatch_failed" error**: Your Railway URL in Slack's event/slash command settings is incorrect.
 - **Translations going to wrong person**: Double-check `MY_SLACK_USER_ID`.
