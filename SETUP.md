@@ -28,6 +28,12 @@ Add these scopes:
 ### Basic Information
 - Copy the **Signing Secret**
 
+### App Home → Enable DMs to the bot
+- Scroll to **Show Tabs** → toggle on **Messages Tab**
+- Check **"Allow users to send Slash commands and messages from the messages tab"**
+- Without this, the DM tab with the bot shows but the message box stays disabled — no reinstall needed, just refresh Slack after saving
+- Required for `/ed dm-watch` to work at all, since it depends on the *other* person being able to freely message the bot
+
 ---
 
 ## Step 2 — Configure Event Subscriptions
