@@ -1025,24 +1025,32 @@ app.action('thread_open_reply_modal', async ({ body, ack, client, logger }) => {
 app.shortcut('translate_message', async ({ shortcut, ack, client, logger }) => {
   await ack();
   try {
-    const channelId = shortcut.channel?.id;
     const userId = shortcut.user.id;
     const messageText = shortcut.message?.text;
-    const threadTs = shortcut.message?.thread_ts || shortcut.message?.ts;
 
     if (!messageText?.trim()) {
-      await client.chat.postEphemeral({ channel: channelId, user: userId, text: '❌ This message has no text to translate.' });
+      await client.views.open({
+        trigger_id: shortcut.trigger_id,
+        view: {
+          type: 'modal',
+          title: { type: 'plain_text', text: 'Translation' },
+          close: { type: 'plain_text', text: 'Close' },
+          blocks: [{ type: 'section', text: { type: 'mrkdwn', text: '❌ This message has no text to translate.' } }],
+        },
+      });
       return;
     }
 
     const targetLang = await hashGet(KEYS.userIncomingLang, userId) || 'en';
+    const targetCode = getLangCode(targetLang);
     const translated = await translate(messageText, targetLang);
 
-    await client.chat.postEphemeral({
-      channel: channelId,
-      user: userId,
-      thread_ts: threadTs,
-      text: `🌐 *Translation (only you see this):*\n${translated}`,
+    // Open as a modal (via trigger_id) rather than postEphemeral — ephemeral delivery
+    // is unreliable in DM threads specifically, and a modal works regardless of
+    // whether the shortcut was run on a channel message, DM message, or thread reply.
+    await client.views.open({
+      trigger_id: shortcut.trigger_id,
+      view: translateTransResultView({ original: messageText, translated, targetCode }),
     });
   } catch (err) {
     logger.error('Error in translate_message shortcut:', err);
