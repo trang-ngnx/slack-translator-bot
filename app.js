@@ -16,7 +16,6 @@ const redis = new Redis(process.env.REDIS_URL);
 const KEYS = {
   subscribers:            'subscribers',
   monitoredChannels:      'monitored_channels',
-  monitoredDmUsers:       'monitored_dm_users',
   userIncomingLang:       'user_incoming_lang',
   userTokens:             'user_tokens',   // hash: userId → user OAuth token
 };
@@ -70,7 +69,6 @@ async function hashDel(key, field)        { await redis.hdel(key, field); }
 async function seedFromEnv() {
   await seedSet(KEYS.subscribers,       process.env.SUBSCRIBER_USER_IDS);
   await seedSet(KEYS.monitoredChannels, process.env.MONITORED_CHANNEL_IDS);
-  await seedSet(KEYS.monitoredDmUsers,  process.env.MONITORED_DM_USER_IDS);
 }
 
 // ── User token helpers ─────────────────────────────────────────────────────
@@ -509,10 +507,9 @@ app.event('message', async ({ event, client, logger }) => {
     if (!event.text?.trim()) { logger.info('[msg] skipped: no text'); return; }
 
     const isMonitoredChannel = await setHas(KEYS.monitoredChannels, event.channel);
-    const isMonitoredDM = event.channel_type === 'im' && await setHas(KEYS.monitoredDmUsers, event.user);
 
-    logger.info(`[msg] isMonitoredChannel=${isMonitoredChannel} isMonitoredDM=${isMonitoredDM}`);
-    if (!isMonitoredChannel && !isMonitoredDM) return;
+    logger.info(`[msg] isMonitoredChannel=${isMonitoredChannel}`);
+    if (!isMonitoredChannel) return;
 
     const allSubscribers = await setAll(KEYS.subscribers);
     const isThreadReply = !!event.thread_ts && event.thread_ts !== event.ts;
@@ -539,37 +536,29 @@ app.event('message', async ({ event, client, logger }) => {
       // Skip if message is already in the user's target language
       if (detectedLang && detectedLang === targetCode) continue;
 
-      if (isMonitoredDM) {
-        const translated = await translate(event.text, targetLang);
-        await client.chat.postMessage({
-          channel: userId,
-          text: `🌐 *[${senderName} — DM Translation]*\n${translated}`,
-        });
-      } else {
-        const translated = await translate(event.text, targetLang);
-        const actionButtons = [
+      const translated = await translate(event.text, targetLang);
+      const actionButtons = [
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: '✏️ Reply with translation', emoji: true },
+          style: 'primary',
+          action_id: 'thread_open_reply_modal',
+          value: ctx,
+        },
+      ];
+      await client.chat.postEphemeral({
+        channel: event.channel,
+        user: userId,
+        ...(isThreadReply ? { thread_ts: threadTs } : {}),
+        text: `🌐 *[${senderName}]* ${translated}`,
+        blocks: [
           {
-            type: 'button',
-            text: { type: 'plain_text', text: '✏️ Reply with translation', emoji: true },
-            style: 'primary',
-            action_id: 'thread_open_reply_modal',
-            value: ctx,
+            type: 'section',
+            text: { type: 'mrkdwn', text: `🌐 *[${senderName}]* ${translated}` },
           },
-        ];
-        await client.chat.postEphemeral({
-          channel: event.channel,
-          user: userId,
-          ...(isThreadReply ? { thread_ts: threadTs } : {}),
-          text: `🌐 *[${senderName}]* ${translated}`,
-          blocks: [
-            {
-              type: 'section',
-              text: { type: 'mrkdwn', text: `🌐 *[${senderName}]* ${translated}` },
-            },
-            { type: 'actions', elements: actionButtons },
-          ],
-        });
-      }
+          { type: 'actions', elements: actionButtons },
+        ],
+      });
     }
   } catch (err) {
     logger.error('Error translating incoming message:', err);
@@ -580,7 +569,7 @@ app.event('message', async ({ event, client, logger }) => {
 app.command('/ed', async ({ command, ack, client, logger }) => {
   await ack();
 
-  const USAGE = 'Available commands:\n• `/ed join` — subscribe to auto-translations\n• `/ed leave` — unsubscribe\n• `/ed lang [language]` — set your preferred incoming translation language\n• `/ed watch` — monitor this channel\n• `/ed unwatch` — stop monitoring this channel\n• `/ed dm-watch @user` — monitor DMs from a user sent to the bot\n• `/ed dm-unwatch @user` — stop monitoring\n• `/ed send` — open a modal to compose, translate, and post a message (replies in-thread if run inside a thread)\n• `/ed send [language] [link or text]` — skip the modal and post directly\n• `/ed trans` — translate privately (opens an input modal in DMs; shows usage in channels)\n• `/ed trans [link or text]` — translate privately (defaults to your `/ed lang` setting) — result pops up as a modal in DMs, or an ephemeral reply in channels/threads\n• `/ed trans [language] [link or text]` — same, but override with a specific language\n• `/ed recap [N]` — DM you the last N translated messages here (default 10; works in DMs, channels, and threads)\n• `/ed recap [message link]` — DM you the full translated thread for a specific message (paste a Slack message link)\n• `/ed viewers add @user1 @user2` — let colleagues privately see your translations here\n• `/ed viewers remove @user1` | `list` | `clear`\n• `/ed login` — authorize so your messages send without the "App" badge\n• `/ed logout` — remove your authorization';
+  const USAGE = 'Available commands:\n• `/ed join` — subscribe to auto-translations\n• `/ed leave` — unsubscribe\n• `/ed lang [language]` — set your preferred incoming translation language\n• `/ed watch` — monitor this channel\n• `/ed unwatch` — stop monitoring this channel\n• `/ed send` — open a modal to compose, translate, and post a message (replies in-thread if run inside a thread)\n• `/ed send [language] [link or text]` — skip the modal and post directly\n• `/ed trans` — translate privately (opens an input modal in DMs; shows usage in channels)\n• `/ed trans [link or text]` — translate privately (defaults to your `/ed lang` setting) — result pops up as a modal in DMs, or an ephemeral reply in channels/threads\n• `/ed trans [language] [link or text]` — same, but override with a specific language\n• `/ed recap [N]` — DM you the last N translated messages here (default 10; works in DMs, channels, and threads)\n• `/ed recap [message link]` — DM you the full translated thread for a specific message (paste a Slack message link)\n• `/ed viewers add @user1 @user2` — let colleagues privately see your translations here\n• `/ed viewers remove @user1` | `list` | `clear`\n• `/ed login` — authorize so your messages send without the "App" badge\n• `/ed logout` — remove your authorization';
 
   const isDM = command.channel_id.startsWith('D');
   async function reply(text) {
@@ -663,31 +652,6 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
       } else {
         await setRemove(KEYS.monitoredChannels, command.channel_id);
         await reply('✅ This channel has been removed from monitoring.');
-      }
-
-    } else if (subcommand === 'dm-watch') {
-      const userMatch = args.match(/<@([A-Z0-9]+)(?:\|[^>]+)?>/);
-      if (!userMatch) {
-        await reply('❌ Usage: `/ed dm-watch @username`\n⚠️ Note: this only translates messages that person sends *to the bot*, not their DMs with you directly (Slack API limitation).');
-        return;
-      }
-      const targetUserId = userMatch[1];
-      if (await setHas(KEYS.monitoredDmUsers, targetUserId)) {
-        await reply(`✅ <@${targetUserId}> is already being monitored.`);
-      } else {
-        await setAdd(KEYS.monitoredDmUsers, targetUserId);
-        await reply(`✅ Done. When <@${targetUserId}> sends a message to the bot, it will be translated for all subscribers.\n⚠️ Reminder: the bot cannot read DMs between you and them directly — only messages they send to the bot.`);
-      }
-
-    } else if (subcommand === 'dm-unwatch') {
-      const userMatch = args.match(/<@([A-Z0-9]+)(?:\|[^>]+)?>/);
-      if (!userMatch) { await reply('❌ Usage: `/ed dm-unwatch @username`'); return; }
-      const targetUserId = userMatch[1];
-      if (!await setHas(KEYS.monitoredDmUsers, targetUserId)) {
-        await reply(`<@${targetUserId}> is not currently being monitored.`);
-      } else {
-        await setRemove(KEYS.monitoredDmUsers, targetUserId);
-        await reply(`✅ Stopped monitoring DMs from <@${targetUserId}>.`);
       }
 
     } else if (subcommand === 'send') {
@@ -833,8 +797,13 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
       // Ephemeral (postEphemeral / respond via response_url) delivery is tied to
       // whichever client session is active when Slack delivers it — it does not
       // sync across devices. A DM is persistent and reachable from any device,
-      // which is the whole point of recap, so results are always sent via DM.
+      // which is the whole point of recap, so results — including failures — are
+      // always sent via DM instead of the generic reply() helper (which falls
+      // back to an ephemeral in channel context, the exact delivery this command
+      // exists to avoid).
       const sendRecapResult = (text) => client.chat.postMessage({ channel: command.user_id, text });
+
+      try {
       const myBotId = await getOwnBotId(client);
 
       const targetLang = await hashGet(KEYS.userIncomingLang, command.user_id) || 'en';
@@ -969,6 +938,10 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
       await sendRecapResult(`📋 *Last ${lines.length} messages in this ${contextLabel} (→ ${targetCode}):*${linkLine}\n\n${lines.join('\n\n─────\n')}`);
       if (!isDM) {
         await reply('📨 Sent the recap to your DMs with me — check there so it\'s available on any device.');
+      }
+      } catch (err) {
+        logger.error('Error in /ed recap:', err);
+        await sendRecapResult(`❌ Something went wrong generating your recap: ${err.message}`);
       }
 
     // ── ed viewers ─────────────────────────────────────────────────────────

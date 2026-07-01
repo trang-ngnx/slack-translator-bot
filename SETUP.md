@@ -1,7 +1,7 @@
 # Slack Translator Bot — Setup Guide
 
 ## What it does
-- **Incoming**: Every message posted in your monitored channels and 1:1 DMs is silently translated to English and shown only to you.
+- **Incoming**: Every message posted in your monitored channels is silently translated to English and shown only to you.
 - **Outgoing `/send`**: Type in any language → bot translates and posts to the channel.
 - **On-demand `/translate`**: Paste a Slack message link → bot fetches and translates it privately (nothing posted).
 
@@ -32,7 +32,6 @@ Add these scopes:
 - Scroll to **Show Tabs** → toggle on **Messages Tab**
 - Check **"Allow users to send Slash commands and messages from the messages tab"**
 - Without this, the DM tab with the bot shows but the message box stays disabled — no reinstall needed, just refresh Slack after saving
-- Required for `/ed dm-watch` to work at all, since it depends on the *other* person being able to freely message the bot
 
 ---
 
@@ -70,7 +69,6 @@ In your app settings → **Slash Commands** → **Create New Command**:
    - `SLACK_SIGNING_SECRET`
    - `SUBSCRIBER_USER_IDS` — comma-separated Slack user IDs to seed as initial subscribers (users can also self-register with `/ed join`)
    - `MONITORED_CHANNEL_IDS`
-   - `MONITORED_DM_USER_IDS` (optional — user IDs of people whose DMs you want translated)
    - `CHANNEL_LANGUAGES` (optional — e.g. `{"C012AB3CD":"Japanese"}`)
    - `OUTGOING_LANGUAGE` (optional, default: English)
    - `PROTECTED_TERMS` (optional — comma-separated brand/product/person names that should never be translated, e.g. `Papabubble,Ownego`)
@@ -88,7 +86,7 @@ In your app settings → **Slash Commands** → **Create New Command**:
 - Right-click any channel → **View channel details** → scroll to bottom → copy the ID (starts with `C`)
 - Or: open the channel in browser — the ID is the last segment of the URL
 
-**Other people's user IDs (for DM monitoring):**
+**Other people's user IDs (e.g. for seeding `SUBSCRIBER_USER_IDS`):**
 - Click their profile → **⋮ More** → **Copy Member ID**
 
 ---
@@ -116,14 +114,6 @@ In each channel you want to monitor or use `/translate` in, type:
 |---|---|
 | Monitor this channel (run inside the channel) | `/ed watch` |
 | Stop monitoring this channel | `/ed unwatch` |
-
-### DM monitoring
-> ⚠️ **Limitation**: Slack does not allow bots to read DMs between two users. DM monitoring only works when the other person messages **the bot directly** — not when they message you.
-
-| What you want | What to do |
-|---|---|
-| Monitor DMs sent to the bot by someone | `/ed dm-watch @username` |
-| Stop monitoring | `/ed dm-unwatch @username` |
 
 ### Translation
 | What you want | What to do |
