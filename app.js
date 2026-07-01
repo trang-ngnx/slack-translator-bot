@@ -1275,9 +1275,12 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
         `Channels are watched automatically as soon as the bot is added to them — no extra step needed. Prefer manual control? Run \`/ed watch\`/\`/ed unwatch\`, or use the *Watched Channels* section in your Home tab (also lets you mute a channel for just yourself).\n\n` +
         `*3. Send translated messages*\n` +
         `Run \`/ed send\` to open a modal — write your message, pick a language (optional), and post it translated to this channel.\n` +
-        `Or right-click any message → *More message shortcuts* → *Translate & Reply* to reply in thread the same way.\n\n` +
+        `Or right-click any message → *More message shortcuts* → *Translate & Reply* to reply in thread the same way.\n` +
+        `💡 *Tip:* \`/ed send\` and \`/ed trans\` also work directly inside a 1:1 DM with a colleague, not just channels — handy for translating a private conversation between just the two of you.\n\n` +
         `*4. Let teammates see your translations*\n` +
         `Run \`/ed viewers add @user1 @user2\`, or manage viewers directly from the *Viewers* section in your Home tab.\n\n` +
+        `*5. Catch up on missed translations*\n` +
+        `Run \`/ed recap\` to get your last several messages here, translated, sent straight to your DMs — works in channels, threads, and DMs alike. Paste a specific Slack message link (\`/ed recap [link]\`) to recap that exact thread instead, from anywhere.\n\n` +
         `Run \`/ed\` anytime to see all available commands.\n\n` +
         `📖 *Full setup guide:* <${CANVAS_URL}|View the Slack canvas>`
       );
