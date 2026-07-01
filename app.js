@@ -934,7 +934,7 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
         return;
       }
 
-      const linkLine = originalLink ? `\n<${originalLink}|🔗 View original message>` : '';
+      const linkLine = originalLink ? `\n${originalLink}` : '';
       await sendRecapResult(`📋 *Last ${lines.length} messages in this ${contextLabel} (→ ${targetCode}):*${linkLine}\n\n${lines.join('\n\n─────\n')}`);
       if (!isDM) {
         await reply('📨 Sent the recap to your DMs with me — check there so it\'s available on any device.');
