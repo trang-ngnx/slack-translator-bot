@@ -698,6 +698,7 @@ async function buildHomeView(client, userId) {
     },
     { type: 'divider' },
     { type: 'header', text: { type: 'plain_text', text: '📡 Watched Channels', emoji: true } },
+    { type: 'context', elements: [{ type: 'mrkdwn', text: 'Channels are watched automatically as soon as the bot is added — no setup needed. "Mute for me" stops translations from a channel for you personally without affecting other subscribers.' }] },
   ];
 
   if (!myChannels.length) {
@@ -724,6 +725,7 @@ async function buildHomeView(client, userId) {
   blocks.push(
     { type: 'divider' },
     { type: 'header', text: { type: 'plain_text', text: '👥 Viewers', emoji: true } },
+    { type: 'context', elements: [{ type: 'mrkdwn', text: 'Let specific colleagues privately see the translated messages you send in a channel with `/ed send` — everyone else only sees your original message.' }] },
   );
 
   if (!myChannels.length) {
@@ -1254,19 +1256,18 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
     } else if (subcommand === 'newbie') {
       await reply(
         `👋 *Welcome to the ED Translator Bot!*\n\nHere's how to get started:\n\n` +
-        `*1. Authorize yourself (required)*\n` +
-        `Run \`/ed login\` and follow the link in your DMs. This lets your messages appear as *you* — not as the bot app. This is important when communicating with clients and partners.\n\n` +
-        `*2. Subscribe to auto-translations*\n` +
-        `Run \`/ed join\` — you'll start automatically receiving private translations for new messages in monitored channels, with no action needed on your part.\n\n` +
-        `*3. Set your language*\n` +
-        `Run \`/ed lang Vietnamese\` (or any language) to receive translations in your preferred language.\n\n` +
-        `*4. Monitor a channel*\n` +
-        `Channels are watched automatically as soon as the bot is added to them — no extra step needed. Prefer to opt in manually? Run \`/ed watch\` in a channel (and \`/ed unwatch\` to stop). Every new message in a watched channel is privately translated for subscribers.\n\n` +
-        `*5. Send translated messages*\n` +
+        `*1. Open your settings*\n` +
+        `Click the bot's name → *Home* tab for a visual settings screen. From there:\n` +
+        `• *Authorize* yourself — lets your messages appear as *you*, not the bot app. Important when talking with clients and partners.\n` +
+        `• *Subscribe* to auto-translations — you'll start receiving private translations automatically, no further action needed.\n` +
+        `• *Set your language* — pick what language incoming translations should be delivered in.\n\n` +
+        `*2. Monitor a channel*\n` +
+        `Channels are watched automatically as soon as the bot is added to them — no extra step needed. Prefer manual control? Run \`/ed watch\`/\`/ed unwatch\`, or use the *Watched Channels* section in your Home tab (also lets you mute a channel for just yourself).\n\n` +
+        `*3. Send translated messages*\n` +
         `Run \`/ed send\` to open a modal — write your message, pick a language (optional), and post it translated to this channel.\n` +
         `Or right-click any message → *More message shortcuts* → *Translate & Reply* to reply in thread the same way.\n\n` +
-        `*6. Let teammates see your translations*\n` +
-        `Run \`/ed viewers add @user1 @user2\` so they privately see what you send (translated) in this channel.\n\n` +
+        `*4. Let teammates see your translations*\n` +
+        `Run \`/ed viewers add @user1 @user2\`, or manage viewers directly from the *Viewers* section in your Home tab.\n\n` +
         `Run \`/ed\` anytime to see all available commands.\n\n` +
         `📖 *Full setup guide:* <${CANVAS_URL}|View the Slack canvas>`
       );
