@@ -97,6 +97,25 @@ async function postAsUser(botClient, userId, params) {
   return botClient.chat.postMessage(params);
 }
 
+// Messages this bot posts on someone's behalf (postAsUser's fallback path, when the
+// sender hasn't done /ed login) still carry this app's own bot_id even though they
+// display under the sender's name/avatar via chat:write.customize — they're real
+// human content, not automated bot noise. Cached since it never changes at runtime.
+let ownBotId = null;
+async function getOwnBotId(client) {
+  if (ownBotId) return ownBotId;
+  const auth = await client.auth.test();
+  ownBotId = auth.bot_id;
+  return ownBotId;
+}
+
+// A message counts as "real conversation content" if it's from a person, or from
+// this bot posting translated content on their behalf — but not from any other
+// app/bot, and not a system subtype (channel_join, message edits, etc.).
+function isRecapWorthy(m, myBotId) {
+  return (!m.bot_id || m.bot_id === myBotId) && !m.subtype && !!m.text?.trim();
+}
+
 // ── Slack app (ExpressReceiver for custom OAuth route) ─────────────────────
 const receiver = new ExpressReceiver({
   signingSecret: process.env.SLACK_SIGNING_SECRET,
@@ -805,6 +824,7 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
       // sync across devices. A DM is persistent and reachable from any device,
       // which is the whole point of recap, so results are always sent via DM.
       const sendRecapResult = (text) => client.chat.postMessage({ channel: command.user_id, text });
+      const myBotId = await getOwnBotId(client);
 
       const targetLang = await hashGet(KEYS.userIncomingLang, command.user_id) || 'en';
       const targetCode = getLangCode(targetLang);
@@ -856,7 +876,7 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
             limit: count + 15,
           });
           rawMessages = (result.messages || [])
-            .filter(m => !m.bot_id && !m.subtype && m.text?.trim())
+            .filter(m => isRecapWorthy(m, myBotId))
             .slice(-count);
           contextLabel = 'linked thread';
         } catch (err) {
@@ -871,7 +891,7 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
           limit: count + 15,
         });
         rawMessages = (result.messages || [])
-          .filter(m => !m.bot_id && !m.subtype && m.text?.trim())
+          .filter(m => isRecapWorthy(m, myBotId))
           .slice(-count);
         contextLabel = 'thread';
       } else {
@@ -881,7 +901,7 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
           limit: count + 15,
         });
         rawMessages = (result.messages || [])
-          .filter(m => !m.bot_id && !m.subtype && m.text?.trim())
+          .filter(m => isRecapWorthy(m, myBotId))
           .slice(0, count)
           .reverse();
         contextLabel = isDM ? 'DM' : 'channel';
