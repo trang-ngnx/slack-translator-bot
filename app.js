@@ -110,8 +110,36 @@ async function getOwnBotId(client) {
 // A message counts as "real conversation content" if it's from a person, or from
 // this bot posting translated content on their behalf — but not from any other
 // app/bot, and not a system subtype (channel_join, message edits, etc.).
+//
+// Slack tags any chat.postMessage call that overrides username/icon_url (exactly
+// what postAsUser's fallback does via chat:write.customize) with subtype
+// "bot_message" — so a blanket "!m.subtype" check silently drops these same
+// real, human-authored translated messages that the bot_id check above was
+// already special-cased to allow through. Only treat "bot_message" as
+// disqualifying when it's NOT this app's own customized post.
 function isRecapWorthy(m, myBotId) {
-  return (!m.bot_id || m.bot_id === myBotId) && !m.subtype && !!m.text?.trim();
+  const isOwnBotMessage = !!m.bot_id && m.bot_id === myBotId;
+  const okSender = !m.bot_id || isOwnBotMessage;
+  const okSubtype = !m.subtype || (isOwnBotMessage && m.subtype === 'bot_message');
+  return okSender && okSubtype && !!m.text?.trim();
+}
+
+// Temporary diagnostic for tracking down why some real, persisted messages
+// aren't surviving recap's filter — logs exactly what each raw message looked
+// like and whether/why it was kept, so a failure is visible in Railway logs
+// instead of requiring another guess-and-check round.
+function logRecapFilter(logger, label, myBotId, rawMessages) {
+  const summary = rawMessages.map(m => ({
+    ts: m.ts,
+    user: m.user || null,
+    username: m.username || null,
+    bot_id: m.bot_id || null,
+    subtype: m.subtype || null,
+    hasText: !!m.text?.trim(),
+    textPreview: m.text ? m.text.slice(0, 40) : null,
+    kept: isRecapWorthy(m, myBotId),
+  }));
+  logger.info(`[recap:${label}] myBotId=${myBotId} fetched=${rawMessages.length} ${JSON.stringify(summary)}`);
 }
 
 // ── Slack app (ExpressReceiver for custom OAuth route) ─────────────────────
@@ -840,6 +868,7 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
             ts: threadTs,
             limit: count + 15,
           });
+          logRecapFilter(logger, 'linked thread', myBotId, result.messages || []);
           rawMessages = (result.messages || [])
             .filter(m => isRecapWorthy(m, myBotId))
             .slice(-count);
@@ -855,6 +884,7 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
           ts: command.thread_ts,
           limit: count + 15,
         });
+        logRecapFilter(logger, 'thread', myBotId, result.messages || []);
         rawMessages = (result.messages || [])
           .filter(m => isRecapWorthy(m, myBotId))
           .slice(-count);
@@ -865,6 +895,7 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
           channel: command.channel_id,
           limit: count + 15,
         });
+        logRecapFilter(logger, 'channel/DM', myBotId, result.messages || []);
         rawMessages = (result.messages || [])
           .filter(m => isRecapWorthy(m, myBotId))
           .slice(0, count)
