@@ -504,10 +504,8 @@ function richTextToPlain(richText) {
 // attachment (is_msg_unfurl, or a channel_id+ts pair identifying the source
 // message) rather than in event.text — so a forward with no added comment
 // would otherwise look like an empty message and get silently skipped.
-// NOT verified against a real forward payload from this workspace — built
-// from Slack's general attachment-based share/unfurl shape. If it doesn't
-// match, the [msg] diagnostic log (blocks/attachments dump) will show the
-// actual shape to fix this against.
+// Confirmed against real Railway logs: this shape is used when forwarding
+// as a new top-level message.
 function extractForwardedContent(event) {
   if (!event.attachments?.length) return null;
   for (const att of event.attachments) {
@@ -524,6 +522,53 @@ function extractForwardedContent(event) {
     }
   }
   return null;
+}
+
+// Forwarding as a REPLY into an existing thread uses a different shape
+// entirely (confirmed via Railway logs): no attachments at all, just a
+// rich_text block containing a `message_mention` element with the source
+// channel_id/message_ts/thread_ts/author_id and a permalink as its "text" —
+// Slack's client resolves and renders the actual quoted content itself, so
+// the event carries none of it. We have to go fetch it ourselves.
+function findForwardedMention(event) {
+  if (!event.blocks?.length) return null;
+  for (const block of event.blocks) {
+    if (block.type !== 'rich_text') continue;
+    for (const section of block.elements || []) {
+      for (const el of section.elements || []) {
+        if (el.type === 'message_mention' && el.channel_id && el.message_ts) {
+          return {
+            channelId: el.channel_id,
+            messageTs: el.message_ts,
+            threadTs: el.thread_ts || el.message_ts,
+          };
+        }
+      }
+    }
+  }
+  return null;
+}
+
+async function resolveForwardedMention(client, mention) {
+  // conversations.replies accepts the ts of any message in a thread (root or
+  // reply) and returns the whole thread — also works for a message with no
+  // thread at all, returning just that one message.
+  const result = await client.conversations.replies({
+    channel: mention.channelId,
+    ts: mention.threadTs,
+    limit: 100,
+  });
+  const msg = (result.messages || []).find(m => m.ts === mention.messageTs);
+  if (!msg?.text) return null;
+
+  let authorName = null;
+  if (msg.user) {
+    try {
+      const info = await client.users.info({ user: msg.user });
+      authorName = info.user?.profile?.display_name || info.user?.profile?.real_name || null;
+    } catch (_) {}
+  }
+  return { text: msg.text, authorName };
 }
 
 // ── Shared modal definition ────────────────────────────────────────────────
@@ -850,11 +895,21 @@ app.event('message', async ({ event, client, logger }) => {
     }
 
     // ── Forwarded message → visible, in-thread translation for the whole channel ──
-    // Checked before the subtype/bot_id skip below, since it's unconfirmed whether
-    // Slack tags forwards with a subtype. Handled as its own exclusive path — a
-    // detected forward never also goes through the per-subscriber ephemeral flow.
+    // Checked before the subtype/bot_id skip below, since Slack doesn't tag
+    // forwards with a subtype. Handled as its own exclusive path — a detected
+    // forward never also goes through the per-subscriber ephemeral flow.
     if (!event.bot_id) {
-      const forwarded = extractForwardedContent(event);
+      let forwarded = extractForwardedContent(event);
+      if (!forwarded) {
+        const mention = findForwardedMention(event);
+        if (mention) {
+          try {
+            forwarded = await resolveForwardedMention(client, mention);
+          } catch (err) {
+            logger.error('Error resolving forwarded message_mention:', err);
+          }
+        }
+      }
       if (forwarded) {
         try {
           const isWatched = await setHas(KEYS.monitoredChannels, event.channel);
