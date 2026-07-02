@@ -813,7 +813,14 @@ async function publishHomeView(client, userId, logger) {
 // ── Incoming: auto-translate messages in monitored channels ────────────────
 app.event('message', async ({ event, client, logger }) => {
   try {
-    logger.info(`[msg] channel=${event.channel} user=${event.user} subtype=${event.subtype} bot_id=${event.bot_id} thread_ts=${event.thread_ts}`);
+    logger.info(`[msg] channel=${event.channel} user=${event.user} subtype=${event.subtype} bot_id=${event.bot_id} thread_ts=${event.thread_ts} textLen=${event.text?.length || 0} hasBlocks=${!!event.blocks?.length} hasAttachments=${!!event.attachments?.length}`);
+    // Temporary: forwarded messages render their quoted content as blocks rather
+    // than plain text, so event.text may be empty or miss the forwarded content
+    // entirely. Logging the raw shape here to confirm before deciding how (or
+    // whether) to extract forwarded text for translation.
+    if (event.blocks?.length || event.attachments?.length) {
+      logger.info(`[msg] blocks/attachments=${JSON.stringify({ blocks: event.blocks, attachments: event.attachments }).slice(0, 800)}`);
+    }
 
     if (event.subtype || event.bot_id) { logger.info('[msg] skipped: subtype/bot'); return; }
     if (!event.text?.trim()) { logger.info('[msg] skipped: no text'); return; }
