@@ -870,14 +870,19 @@ app.event('message', async ({ event, client, logger }) => {
             } catch (_) {}
 
             if (!detectedLang || detectedLang !== channelLangCode) {
+              // If the forward itself is a reply within an existing thread,
+              // post into that same thread rather than starting a new one
+              // anchored on the reply — matches how the rest of the bot
+              // threads its replies (event.thread_ts || event.ts).
+              const replyThreadTs = event.thread_ts || event.ts;
               const translated = await translate(forwarded.text, channelLangCode);
               const authorLabel = forwarded.authorName ? ` from *${forwarded.authorName}*` : '';
               await client.chat.postMessage({
                 channel: event.channel,
-                thread_ts: event.ts,
+                thread_ts: replyThreadTs,
                 text: `🌐 *Forwarded message${authorLabel} (→ ${channelLangCode}):*\n${translated}`,
               });
-              logger.info(`[forward] translated and posted in thread ${event.ts} of ${event.channel}`);
+              logger.info(`[forward] translated and posted in thread ${replyThreadTs} of ${event.channel}`);
             } else {
               logger.info('[forward] skipped: already in channel outgoing language');
             }
