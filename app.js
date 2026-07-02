@@ -499,6 +499,33 @@ function richTextToPlain(richText) {
   return parts.join('');
 }
 
+// Best-effort extraction of a forwarded message's quoted content. Slack's
+// "Forward message" feature renders the quoted original as a message-share
+// attachment (is_msg_unfurl, or a channel_id+ts pair identifying the source
+// message) rather than in event.text — so a forward with no added comment
+// would otherwise look like an empty message and get silently skipped.
+// NOT verified against a real forward payload from this workspace — built
+// from Slack's general attachment-based share/unfurl shape. If it doesn't
+// match, the [msg] diagnostic log (blocks/attachments dump) will show the
+// actual shape to fix this against.
+function extractForwardedContent(event) {
+  if (!event.attachments?.length) return null;
+  for (const att of event.attachments) {
+    const looksLikeForward = att.is_msg_unfurl === true || (att.channel_id && att.ts);
+    if (!looksLikeForward) continue;
+
+    let text = (att.text || att.fallback || '').trim();
+    if (!text && Array.isArray(att.message_blocks)) {
+      const allBlocks = att.message_blocks.flatMap(mb => mb.message?.blocks || mb.blocks || []);
+      text = allBlocks.filter(b => b.type === 'rich_text').map(b => richTextToPlain(b)).join('\n').trim();
+    }
+    if (text) {
+      return { text, authorName: att.author_name || null };
+    }
+  }
+  return null;
+}
+
 // ── Shared modal definition ────────────────────────────────────────────────
 function translateReplyModalView(channelId, threadTs) {
   return {
@@ -820,6 +847,48 @@ app.event('message', async ({ event, client, logger }) => {
     // whether) to extract forwarded text for translation.
     if (event.blocks?.length || event.attachments?.length) {
       logger.info(`[msg] blocks/attachments=${JSON.stringify({ blocks: event.blocks, attachments: event.attachments }).slice(0, 800)}`);
+    }
+
+    // ── Forwarded message → visible, in-thread translation for the whole channel ──
+    // Checked before the subtype/bot_id skip below, since it's unconfirmed whether
+    // Slack tags forwards with a subtype. Handled as its own exclusive path — a
+    // detected forward never also goes through the per-subscriber ephemeral flow.
+    if (!event.bot_id) {
+      const forwarded = extractForwardedContent(event);
+      if (forwarded) {
+        try {
+          const isWatched = await setHas(KEYS.monitoredChannels, event.channel);
+          if (isWatched) {
+            const channelLangCode = getLangCode(
+              (await hashGet(KEYS.channelOutgoingLang, event.channel)) || CHANNEL_LANGUAGES[event.channel] || DEFAULT_OUTGOING_LANG
+            );
+
+            let detectedLang = null;
+            try {
+              const detectJson = await googleTranslateRaw(forwarded.text.slice(0, 200), 'en');
+              detectedLang = normalizeDetectedLang(detectJson[2]) || null;
+            } catch (_) {}
+
+            if (!detectedLang || detectedLang !== channelLangCode) {
+              const translated = await translate(forwarded.text, channelLangCode);
+              const authorLabel = forwarded.authorName ? ` from *${forwarded.authorName}*` : '';
+              await client.chat.postMessage({
+                channel: event.channel,
+                thread_ts: event.ts,
+                text: `🌐 *Forwarded message${authorLabel} (→ ${channelLangCode}):*\n${translated}`,
+              });
+              logger.info(`[forward] translated and posted in thread ${event.ts} of ${event.channel}`);
+            } else {
+              logger.info('[forward] skipped: already in channel outgoing language');
+            }
+          } else {
+            logger.info('[forward] skipped: channel not watched');
+          }
+        } catch (err) {
+          logger.error('Error translating forwarded message:', err);
+        }
+        return;
+      }
     }
 
     if (event.subtype || event.bot_id) { logger.info('[msg] skipped: subtype/bot'); return; }

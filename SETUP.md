@@ -4,6 +4,7 @@
 - **Incoming**: Every message posted in your monitored channels is silently translated to English and shown only to you.
 - **Outgoing `/send`**: Type in any language → bot translates and posts to the channel.
 - **On-demand `/translate`**: Paste a Slack message link → bot fetches and translates it privately (nothing posted).
+- **Forwarded messages**: Forward a message into a watched channel and, if it's not already in that channel's outgoing language, the bot posts a visible translation in the same thread — automatic, no command needed. ⚠️ Not yet verified against a real forward from this workspace; see Troubleshooting if it doesn't fire.
 
 ---
 
@@ -154,3 +155,4 @@ Anyone in the workspace can use the bot — no setup needed:
 - **`/ed trans` says "could not fetch message"**: The bot isn't in that channel — run `/invite @botname` there first.
 - **"dispatch_failed" error**: Your Railway URL in Slack's event/slash command settings is incorrect.
 - **Translations going to wrong person**: Double-check `MY_SLACK_USER_ID`.
+- **Forwarded messages aren't getting translated**: This feature's detection logic was built from Slack's general attachment-based share/unfurl shape, not verified against a real forward from this workspace. Check Railway logs for a `[msg]` line at the time of the forward — it dumps `event.blocks`/`event.attachments` (truncated) so the actual payload shape can be compared against `extractForwardedContent()` in `app.js` and adjusted if it doesn't match.
