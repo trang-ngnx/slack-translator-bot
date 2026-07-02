@@ -8,6 +8,7 @@
     "dev": "nodemon app.js"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.109.1",
     "@slack/bolt": "^3.19.0",
     "compromise": "^14.15.1",
     "dotenv": "^16.4.5",

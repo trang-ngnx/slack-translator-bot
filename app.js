@@ -5,11 +5,17 @@ const https = require('https');
 const http = require('http');
 const Redis = require('ioredis');
 const nlp = require('compromise');
+const Anthropic = require('@anthropic-ai/sdk');
 
 // ── Config ─────────────────────────────────────────────────────────────────
 const CHANNEL_LANGUAGES = JSON.parse(process.env.CHANNEL_LANGUAGES || '{}');
 const DEFAULT_OUTGOING_LANG = process.env.OUTGOING_LANGUAGE || 'English';
 const CANVAS_URL = process.env.CANVAS_URL || '';
+// Claude-powered outgoing translation (optional): set ANTHROPIC_API_KEY to
+// route /ed send and thread replies through Claude for natural, context-aware
+// translations. Without a key, everything falls back to Google Translate.
+const CLAUDE_MODEL = process.env.CLAUDE_MODEL || 'claude-opus-4-8';
+const anthropic = process.env.ANTHROPIC_API_KEY ? new Anthropic() : null;
 
 // ── Redis persistent store ─────────────────────────────────────────────────
 const redis = new Redis(process.env.REDIS_URL);
@@ -53,9 +59,14 @@ async function muteChannelForUser(userId, channelId)    { await redis.sadd(muted
 async function unmuteChannelForUser(userId, channelId)  { await redis.srem(mutedChannelsKey(userId), channelId); }
 
 // Send ephemeral notifications to all viewers of a translation in a channel
-async function notifyViewers(client, { senderId, channelId, threadTs, senderName, senderAvatarUrl, originalText, translatedBlocks, targetLabel }) {
+async function notifyViewers(client, { senderId, channelId, threadTs, senderName, senderAvatarUrl, originalText, translatedBlocks, translatedText, targetLabel }) {
   const ids = await viewersList(senderId, channelId);
   if (!ids.length) return;
+  // Claude-translated messages carry mrkdwn text; Google-translated ones carry
+  // rich_text elements — render whichever this send produced.
+  const translatedBlock = translatedBlocks
+    ? { type: 'rich_text', elements: translatedBlocks }
+    : { type: 'section', text: { type: 'mrkdwn', text: translatedText || '' } };
   for (const viewerId of ids) {
     await client.chat.postEphemeral({
       channel: channelId,
@@ -68,7 +79,7 @@ async function notifyViewers(client, { senderId, channelId, threadTs, senderName
       blocks: [
         { type: 'section', text: { type: 'mrkdwn', text: `👁 Sent a translated message (→ ${targetLabel}):\n*Original:* ${originalText}` } },
         { type: 'divider' },
-        { type: 'rich_text', elements: translatedBlocks },
+        translatedBlock,
       ],
     });
   }
@@ -430,6 +441,125 @@ async function translate(text, targetLanguage) {
   }));
 
   return parts.join('');
+}
+
+// ── Claude-powered outgoing translation ────────────────────────────────────
+// Google's endpoint translates word-by-word with no awareness of the
+// conversation, which reads unnaturally to native speakers. For outgoing
+// messages (where quality matters most — they're sent to clients/partners),
+// Claude translates the whole message at once with the surrounding thread as
+// context for terminology and tone. Google remains the fallback.
+
+// Convert the modal's rich_text input into Slack mrkdwn so formatting
+// survives a single-string translation (Claude preserves mrkdwn markers,
+// unlike Google which needed per-element structural translation).
+function richTextElementToMrkdwn(el) {
+  switch (el.type) {
+    case 'text': {
+      let t = el.text || '';
+      const s = el.style || {};
+      if (s.code) t = `\`${t}\``;
+      if (s.strike) t = `~${t}~`;
+      if (s.italic) t = `_${t}_`;
+      if (s.bold) t = `*${t}*`;
+      return t;
+    }
+    case 'emoji': return `:${el.name}:`;
+    case 'user': return `<@${el.user_id}>`;
+    case 'channel': return `<#${el.channel_id}>`;
+    case 'link': return el.text && el.text !== el.url ? `<${el.url}|${el.text}>` : `<${el.url}>`;
+    case 'broadcast': return `<!${el.range}>`;
+    default: return el.text || '';
+  }
+}
+
+function richTextToMrkdwn(richText) {
+  const out = [];
+  for (const block of richText?.elements || []) {
+    if (block.type === 'rich_text_section') {
+      out.push((block.elements || []).map(richTextElementToMrkdwn).join(''));
+    } else if (block.type === 'rich_text_list') {
+      (block.elements || []).forEach((li, i) => {
+        const bullet = block.style === 'ordered' ? `${i + 1}. ` : '• ';
+        out.push(bullet + (li.elements || []).map(richTextElementToMrkdwn).join(''));
+      });
+    } else if (block.type === 'rich_text_quote') {
+      out.push('> ' + (block.elements || []).map(richTextElementToMrkdwn).join(''));
+    } else if (block.type === 'rich_text_preformatted') {
+      out.push('```' + (block.elements || []).map(e => e.text || '').join('') + '```');
+    }
+  }
+  return out.join('\n');
+}
+
+const userNameCache = new Map();
+async function cachedDisplayName(client, userId) {
+  if (!userId) return 'Unknown';
+  if (userNameCache.has(userId)) return userNameCache.get(userId);
+  try {
+    const info = await client.users.info({ user: userId });
+    const name = info.user?.profile?.display_name || info.user?.profile?.real_name || userId;
+    userNameCache.set(userId, name);
+    return name;
+  } catch (_) {
+    return userId;
+  }
+}
+
+// Recent conversation around the message being sent — the thread if there is
+// one, otherwise the channel's latest messages. Best-effort: any failure just
+// means Claude translates without context.
+async function fetchConversationContext(client, channelId, threadTs, limit = 15) {
+  try {
+    let msgs;
+    if (threadTs) {
+      const result = await client.conversations.replies({ channel: channelId, ts: threadTs, limit: limit + 10 });
+      msgs = result.messages || [];
+    } else {
+      const result = await client.conversations.history({ channel: channelId, limit: limit + 10 });
+      msgs = (result.messages || []).reverse();
+    }
+    const lines = [];
+    for (const m of msgs.filter(m => m.text?.trim()).slice(-limit)) {
+      const name = m.username || await cachedDisplayName(client, m.user);
+      lines.push(`${name}: ${m.text}`);
+    }
+    return lines.join('\n') || null;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function claudeTranslate(text, targetCode, threadContext) {
+  const targetName = langDisplayName(targetCode);
+  const system = [
+    'You are a professional translator embedded in a Slack bot used for business conversations between a company and its clients and partners.',
+    `Translate the user's message into ${targetName} (language code: ${targetCode}).`,
+    'Rules:',
+    '- Produce a natural, fluent, business-appropriate translation — not a literal word-for-word one. Match the politeness and formality conventions of the target language (e.g. appropriate keigo in Japanese).',
+    '- When thread context is provided, use it only to resolve terminology, names, pronouns, and tone. Translate ONLY the message given — never translate, answer, or include the context itself.',
+    '- Preserve Slack formatting exactly: *bold*, _italic_, ~strike~, `code`, ``` code blocks ```, <@USERID> mentions, <#CHANNELID> references, <url|label> links, and :emoji: codes must pass through untouched.',
+    '- Keep personal names, brand names, and product names untranslated.',
+    ...(PROTECTED_TERMS.length ? [`- Never translate these terms — keep them exactly as written: ${PROTECTED_TERMS.join(', ')}.`] : []),
+    '- If the message is already entirely in the target language, return it unchanged.',
+    '- Output ONLY the translated message text — no preamble, no explanation, no quotes around it.',
+  ].join('\n');
+
+  const userContent = threadContext
+    ? `<thread_context>\n${threadContext}\n</thread_context>\n\n<message_to_translate>\n${text}\n</message_to_translate>`
+    : text;
+
+  const response = await anthropic.messages.create({
+    model: CLAUDE_MODEL,
+    max_tokens: 4096,
+    thinking: { type: 'adaptive' },
+    system,
+    messages: [{ role: 'user', content: userContent }],
+  });
+
+  const out = response.content.filter(b => b.type === 'text').map(b => b.text).join('').trim();
+  if (!out) throw new Error(`Claude returned no translation (stop_reason: ${response.stop_reason})`);
+  return out;
 }
 
 async function detectChannelLanguage(client, channelId) {
@@ -1638,9 +1768,28 @@ app.view('translate_reply_modal', async ({ view, ack, client, body, logger }) =>
     if (!targetCode) targetCode = await hashGet(KEYS.channelOutgoingLang, channelId);
     if (!targetCode) targetCode = getLangCode(CHANNEL_LANGUAGES[channelId] || DEFAULT_OUTGOING_LANG);
 
-    // Translate each text element individually — preserves bold/italic/strike structure
-    const translatedRichText = await translateRichText(richTextValue, targetCode);
-    const plainFallback = richTextToPlain(translatedRichText);
+    // Preferred path: Claude translates the whole message with the thread as
+    // context — much more natural output than Google's word-by-word endpoint.
+    // Formatting survives as mrkdwn (Claude passes the markers through), so
+    // the message posts as plain text rather than rich_text blocks.
+    let claudeTranslated = null;
+    if (anthropic) {
+      try {
+        const sourceMrkdwn = richTextToMrkdwn(richTextValue);
+        const context = await fetchConversationContext(client, channelId, threadTs);
+        claudeTranslated = await claudeTranslate(sourceMrkdwn, targetCode, context);
+        logger.info(`[claude] translated outgoing message → ${targetCode}`);
+      } catch (err) {
+        logger.error('Claude translation failed, falling back to Google:', err);
+      }
+    }
+
+    // Fallback: per-element Google translation preserving rich_text structure
+    let translatedRichText = null;
+    if (!claudeTranslated) {
+      translatedRichText = await translateRichText(richTextValue, targetCode);
+    }
+    const plainFallback = claudeTranslated || richTextToPlain(translatedRichText);
 
     const profileRes = await client.users.info({ user: body.user.id });
     const profile = profileRes.user?.profile;
@@ -1653,7 +1802,7 @@ app.view('translate_reply_modal', async ({ view, ack, client, body, logger }) =>
       text: plainFallback,
       username: displayName,
       icon_url: avatarUrl,
-      blocks: [{ type: 'rich_text', elements: translatedRichText.elements }],
+      ...(translatedRichText ? { blocks: [{ type: 'rich_text', elements: translatedRichText.elements }] } : {}),
     });
 
     // Confirmation with the original text — only visible to the sender.
@@ -1687,7 +1836,9 @@ app.view('translate_reply_modal', async ({ view, ack, client, body, logger }) =>
       senderName: displayName,
       senderAvatarUrl: avatarUrl,
       originalText: originalPlain,
-      translatedBlocks: translatedRichText.elements,
+      ...(translatedRichText
+        ? { translatedBlocks: translatedRichText.elements }
+        : { translatedText: claudeTranslated }),
       targetLabel: targetCode,
     });
   } catch (err) {
