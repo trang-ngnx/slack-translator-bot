@@ -876,7 +876,9 @@ app.event('message', async ({ event, client, logger }) => {
               // threads its replies (event.thread_ts || event.ts).
               const replyThreadTs = event.thread_ts || event.ts;
               const translated = await translate(forwarded.text, channelLangCode);
-              const authorLabel = forwarded.authorName ? ` from *${forwarded.authorName}*` : '';
+              // Slack mrkdwn can't nest *bold* spans — keep the whole header inside
+              // a single bold span rather than wrapping the author name separately.
+              const authorLabel = forwarded.authorName ? ` from ${forwarded.authorName}` : '';
               await client.chat.postMessage({
                 channel: event.channel,
                 thread_ts: replyThreadTs,
