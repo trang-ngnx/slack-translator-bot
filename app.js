@@ -20,7 +20,21 @@ const KEYS = {
   userIncomingLang:       'user_incoming_lang',
   userTokens:             'user_tokens',   // hash: userId → user OAuth token
   channelOutgoingLang:    'channel_outgoing_lang', // hash: channelId → language code
+  channelExcludedLangs:   'channel_excluded_langs', // hash: channelId → comma-separated language codes
 };
+
+// Source languages to skip entirely in a channel's regular auto-translate —
+// e.g. a team's own internal language, so it isn't ephemeral-translated for
+// every subscriber. Independent of channelOutgoingLang, which only affects
+// /ed send and the forwarded-message flow.
+async function getChannelExcludedLangs(channelId) {
+  const raw = await hashGet(KEYS.channelExcludedLangs, channelId);
+  return raw ? raw.split(',').filter(Boolean) : [];
+}
+async function setChannelExcludedLangs(channelId, codes) {
+  if (codes.length) await hashSet(KEYS.channelExcludedLangs, channelId, codes.join(','));
+  else await hashDel(KEYS.channelExcludedLangs, channelId);
+}
 
 // Per-user per-channel translation viewers (Redis set per key)
 function viewersKey(userId, channelId) { return `viewers:${userId}:${channelId}`; }
@@ -696,6 +710,42 @@ function viewersModalView(channelId, currentViewerIds) {
   };
 }
 
+// Same multi-select-needs-a-modal constraint as viewersModalView above.
+function excludedLangsModalView(channelId, currentCodes) {
+  const options = Object.entries(LANG_CODES).map(([name, code]) => ({
+    text: { type: 'plain_text', text: name.charAt(0).toUpperCase() + name.slice(1) },
+    value: code,
+  }));
+  const element = {
+    type: 'multi_static_select',
+    action_id: 'excluded_langs_input',
+    placeholder: { type: 'plain_text', text: 'Select languages to skip' },
+    options,
+  };
+  const initialOptions = options.filter(o => currentCodes.includes(o.value));
+  if (initialOptions.length) element.initial_options = initialOptions;
+
+  return {
+    type: 'modal',
+    callback_id: 'home_excluded_langs_modal',
+    private_metadata: JSON.stringify({ channelId }),
+    title: { type: 'plain_text', text: 'Exclude Languages' },
+    submit: { type: 'plain_text', text: 'Save' },
+    close: { type: 'plain_text', text: 'Cancel' },
+    blocks: [
+      { type: 'section', text: { type: 'mrkdwn', text:
+        `Messages detected in these languages won't be auto-translated in <#${channelId}> for anyone — useful for a team's own internal language. Forwarded messages are unaffected and still get translated per the channel's outgoing language above.` } },
+      {
+        type: 'input',
+        block_id: 'excluded_langs_block',
+        optional: true,
+        label: { type: 'plain_text', text: 'Languages to skip' },
+        element,
+      },
+    ],
+  };
+}
+
 // Channels the given user belongs to that are also currently watched —
 // shared by both the Watched Channels and Viewers sections below.
 async function getMyWatchedChannels(client, userId) {
@@ -782,7 +832,7 @@ async function buildHomeView(client, userId) {
     }] : []),
     { type: 'divider' },
     { type: 'header', text: { type: 'plain_text', text: '📡 Watched Channels', emoji: true } },
-    { type: 'context', elements: [{ type: 'mrkdwn', text: 'Channels are watched automatically as soon as the bot is added — no setup needed. "Mute for me" stops translations from a channel for you personally without affecting other subscribers. The outgoing language applies to everyone using `/ed send` here.' }] },
+    { type: 'context', elements: [{ type: 'mrkdwn', text: 'Channels are watched automatically as soon as the bot is added — no setup needed. "Mute for me" stops translations from a channel for you personally without affecting other subscribers. The outgoing language applies to everyone using `/ed send` here. "Exclude languages" skips auto-translate channel-wide for messages already in your team\'s own language.' }] },
   ];
 
   if (!myChannels.length) {
@@ -826,6 +876,22 @@ async function buildHomeView(client, userId) {
             text: { type: 'plain_text', text: name.charAt(0).toUpperCase() + name.slice(1) },
             value: code,
           })),
+        },
+      });
+
+      // Source languages to skip in regular auto-translate — e.g. the team's
+      // own internal language, independent of the outgoing language above.
+      const excludedCodes = await getChannelExcludedLangs(channel.id);
+      blocks.push({
+        type: 'section',
+        text: { type: 'mrkdwn', text: excludedCodes.length
+          ? `🚫 Auto-translate skips: ${excludedCodes.map(langDisplayName).join(', ')}`
+          : '_No languages excluded from auto-translate._' },
+        accessory: {
+          type: 'button',
+          text: { type: 'plain_text', text: 'Exclude languages' },
+          action_id: 'home_manage_excluded_langs',
+          value: channel.id,
         },
       });
     }
@@ -972,6 +1038,16 @@ app.event('message', async ({ event, client, logger }) => {
       const detectJson = await googleTranslateRaw(event.text.slice(0, 200), 'en');
       detectedLang = normalizeDetectedLang(detectJson[2]) || null;
     } catch (_) {}
+
+    // Channel-wide source-language exclusion (e.g. the team's own internal
+    // language) — skipped for everyone, not just subscribers whose personal
+    // target language happens to match. Forwarded messages went through
+    // their own path above and are unaffected by this.
+    const excludedLangs = await getChannelExcludedLangs(event.channel);
+    if (detectedLang && excludedLangs.includes(detectedLang)) {
+      logger.info(`[msg] skipped: ${detectedLang} is excluded from auto-translate for this channel`);
+      return;
+    }
 
     // Fetch sender's display name once for all subscribers
     const senderInfo = await client.users.info({ user: event.user });
@@ -1751,6 +1827,38 @@ app.action('home_set_channel_lang', async ({ ack, body, client, logger }) => {
 
 // ── App Home: link-out button — no-op, just needs to be acknowledged ───────
 app.action('home_open_canvas', async ({ ack }) => { await ack(); });
+
+// ── App Home: "Exclude languages" opens a modal (multi-select requires one) ─
+app.action('home_manage_excluded_langs', async ({ ack, body, client, logger }) => {
+  await ack();
+  try {
+    const channelId = body.actions[0].value;
+    const currentCodes = await getChannelExcludedLangs(channelId);
+    await client.views.open({
+      trigger_id: body.trigger_id,
+      view: excludedLangsModalView(channelId, currentCodes),
+    });
+  } catch (err) {
+    logger.error('Error in home_manage_excluded_langs:', err);
+  }
+});
+
+// ── App Home: excluded-languages modal submit — replaces the full set ──────
+app.view('home_excluded_langs_modal', async ({ ack, view, body, client, logger }) => {
+  try {
+    const { channelId } = JSON.parse(view.private_metadata);
+    const userId = body.user.id;
+    const selected = (view.state.values.excluded_langs_block.excluded_langs_input.selected_options || []).map(o => o.value);
+
+    await setChannelExcludedLangs(channelId, selected);
+
+    await ack();
+    await publishHomeView(client, userId, logger);
+  } catch (err) {
+    logger.error('Error in home_excluded_langs_modal submit:', err);
+    await ack();
+  }
+});
 
 // ── App Home: "Manage viewers" opens a modal (multi-select requires one) ───
 app.action('home_manage_viewers', async ({ ack, body, client, logger }) => {

@@ -131,6 +131,9 @@ Open the bot's **Home** tab (click its name → Home) for a visual settings scre
 | Monitor this channel (run inside the channel) | `/ed watch` |
 | Stop monitoring this channel (affects all subscribers) | `/ed unwatch` |
 | Stop translations from this channel for yourself only | Home tab → channel menu → **Mute for me** |
+| Stop auto-translating a language everyone in the channel already understands (e.g. the team's own internal language) | Home tab → channel menu → **Exclude languages** |
+
+> "Exclude languages" is channel-wide and only affects the regular incoming auto-translate — it doesn't touch forwarded messages, which are always translated per the channel's outgoing language regardless. This is meant for internal channels where the team communicates in one language day-to-day but still forwards messages from other languages in for translation.
 
 ### Translation
 | What you want | What to do |
