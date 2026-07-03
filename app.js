@@ -1211,10 +1211,16 @@ app.event('message', async ({ event, client, logger }) => {
             value: ctx,
           },
         ];
+        // In channels, anchor the translation to the message's own thread even
+        // for top-level messages — keeps translations visually attached to what
+        // they translate instead of floating in the channel. DMs keep the old
+        // behavior (threading only actual thread replies) so translations stay
+        // in the main conversation view there.
+        const anchorToThread = isThreadReply || !event.channel.startsWith('D');
         await client.chat.postEphemeral({
           channel: event.channel,
           user: userId,
-          ...(isThreadReply ? { thread_ts: threadTs } : {}),
+          ...(anchorToThread ? { thread_ts: threadTs } : {}),
           text: `🌐 *[${senderName}]* ${translated}`,
           blocks: [
             {
