@@ -12,8 +12,8 @@ const CHANNEL_LANGUAGES = JSON.parse(process.env.CHANNEL_LANGUAGES || '{}');
 const DEFAULT_OUTGOING_LANG = process.env.OUTGOING_LANGUAGE || 'English';
 const CANVAS_URL = process.env.CANVAS_URL || '';
 // Claude-powered outgoing translation (optional): set ANTHROPIC_API_KEY to
-// route /ed send and thread replies through Claude for natural, context-aware
-// translations. Without a key, everything falls back to Google Translate.
+// route translated replies (Translate & Reply) through Claude for natural,
+// context-aware translations. Without a key, everything falls back to Google.
 const CLAUDE_MODEL = process.env.CLAUDE_MODEL || 'claude-opus-4-8';
 const anthropic = process.env.ANTHROPIC_API_KEY ? new Anthropic() : null;
 
@@ -32,7 +32,7 @@ const KEYS = {
 // Source languages to skip entirely in a channel's regular auto-translate —
 // e.g. a team's own internal language, so it isn't ephemeral-translated for
 // every subscriber. Independent of channelOutgoingLang, which only affects
-// /ed send and the forwarded-message flow.
+// translated replies and the forwarded-message flow.
 async function getChannelExcludedLangs(channelId) {
   const raw = await hashGet(KEYS.channelExcludedLangs, channelId);
   return raw ? raw.split(',').filter(Boolean) : [];
@@ -721,7 +721,7 @@ function translateReplyModalView(channelId, threadTs) {
     type: 'modal',
     callback_id: 'translate_reply_modal',
     private_metadata: JSON.stringify({ channelId, threadTs }),
-    title: { type: 'plain_text', text: threadTs ? 'Translate & Reply' : 'Translate & Send' },
+    title: { type: 'plain_text', text: 'Translate & Reply' },
     submit: { type: 'plain_text', text: 'Translate & Send' },
     close: { type: 'plain_text', text: 'Cancel' },
     blocks: [
@@ -948,7 +948,7 @@ async function buildHomeView(client, userId) {
       text: { type: 'mrkdwn', text:
         '*How to use Ed:*\n' +
         '• *Receive translations* — subscribe above and join a watched channel; new messages there are privately translated for you.\n' +
-        '• *Send translated messages* — run `/ed send` (opens a modal) to write in your own language and post it translated into a channel. For a quick private translation without posting, use `/ed trans`.' },
+        '• *Send translated messages* — right-click a message → *Translate & Reply* (or the ✏️ button on an auto-translation) to write in your own language and post it translated in that thread. For a quick private translation without posting, use `/ed trans`.' },
     },
     ...(CANVAS_URL ? [{
       type: 'section',
@@ -962,7 +962,7 @@ async function buildHomeView(client, userId) {
     }] : []),
     { type: 'divider' },
     { type: 'header', text: { type: 'plain_text', text: '📡 Watched Channels', emoji: true } },
-    { type: 'context', elements: [{ type: 'mrkdwn', text: 'Channels are watched automatically as soon as the bot is added — no setup needed. "Mute for me" stops translations from a channel for you personally without affecting other subscribers. The outgoing language applies to everyone using `/ed send` here. "Exclude languages" skips auto-translate channel-wide for messages already in your team\'s own language.' }] },
+    { type: 'context', elements: [{ type: 'mrkdwn', text: 'Channels are watched automatically as soon as the bot is added — no setup needed. "Mute for me" stops translations from a channel for you personally without affecting other subscribers. The outgoing language applies to everyone\'s translated replies and forwarded-message translations here. "Exclude languages" skips auto-translate channel-wide for messages already in your team\'s own language.' }] },
   ];
 
   if (!myChannels.length) {
@@ -984,9 +984,10 @@ async function buildHomeView(client, userId) {
         },
       });
 
-      // Outgoing language for /ed send in this channel — shared across everyone
-      // who sends there, same as /ed watch itself. Stored in Redis so picking
-      // one here takes effect immediately, no redeploy required.
+      // Outgoing language for this channel (translated replies + forwarded-
+      // message translations) — shared across everyone who sends there, same
+      // as /ed watch itself. Stored in Redis so picking one here takes effect
+      // immediately, no redeploy required.
       const channelLangCode = getLangCode(
         (await hashGet(KEYS.channelOutgoingLang, channel.id)) || CHANNEL_LANGUAGES[channel.id] || DEFAULT_OUTGOING_LANG
       );
@@ -994,7 +995,7 @@ async function buildHomeView(client, userId) {
       blocks.push({
         type: 'section',
         block_id: `channel_lang:${channel.id}`,
-        text: { type: 'mrkdwn', text: `Outgoing language for \`/ed send\` here:` },
+        text: { type: 'mrkdwn', text: `Outgoing language for translations posted here:` },
         accessory: {
           type: 'static_select',
           action_id: 'home_set_channel_lang',
@@ -1030,7 +1031,7 @@ async function buildHomeView(client, userId) {
   blocks.push(
     { type: 'divider' },
     { type: 'header', text: { type: 'plain_text', text: '👥 Viewers', emoji: true } },
-    { type: 'context', elements: [{ type: 'mrkdwn', text: 'Let specific colleagues privately see the translated messages you send in a channel with `/ed send` — everyone else only sees your original message.' }] },
+    { type: 'context', elements: [{ type: 'mrkdwn', text: 'Let specific colleagues privately see the translated replies you send in a channel via *Translate & Reply* — everyone else only sees your original message.' }] },
   );
 
   if (!myChannels.length) {
@@ -1249,7 +1250,7 @@ app.event('member_joined_channel', async ({ event, client, logger }) => {
 app.command('/ed', async ({ command, ack, client, logger }) => {
   await ack();
 
-  const USAGE = 'Available commands:\n• `/ed join` — subscribe to auto-translations\n• `/ed leave` — unsubscribe\n• `/ed lang [language]` — set your preferred incoming translation language\n• `/ed watch` — monitor this channel (also happens automatically when the bot is added to a channel)\n• `/ed unwatch` — stop monitoring this channel\n• `/ed send` — open a modal to compose, translate, and post a message (replies in-thread if run inside a thread)\n• `/ed send [language] [link or text]` — skip the modal and post directly\n• `/ed trans` — translate privately (opens an input modal in DMs; shows usage in channels)\n• `/ed trans [link or text]` — translate privately (defaults to your `/ed lang` setting) — result pops up as a modal in DMs, or an ephemeral reply in channels/threads\n• `/ed trans [language] [link or text]` — same, but override with a specific language\n• `/ed recap [N]` — DM you the last N translated messages here (default 10; works in DMs, channels, and threads)\n• `/ed recap [message link]` — DM you the full translated thread for a specific message (paste a Slack message link)\n• `/ed viewers add @user1 @user2` — let colleagues privately see your translations here\n• `/ed viewers remove @user1` | `list` | `clear`\n• `/ed login` — authorize so your messages send without the "App" badge\n• `/ed logout` — remove your authorization';
+  const USAGE = 'Available commands:\n• `/ed join` — subscribe to auto-translations\n• `/ed leave` — unsubscribe\n• `/ed lang [language]` — set your preferred incoming translation language\n• `/ed watch` — monitor this channel (also happens automatically when the bot is added to a channel)\n• `/ed unwatch` — stop monitoring this channel\n• `/ed trans` — translate privately (opens an input modal in DMs; shows usage in channels)\n• `/ed trans [link or text]` — translate privately (defaults to your `/ed lang` setting) — result pops up as a modal in DMs, or an ephemeral reply in channels/threads\n• `/ed trans [language] [link or text]` — same, but override with a specific language\n• `/ed recap [N]` — DM you the last N translated messages here (default 10; works in DMs, channels, and threads)\n• `/ed recap [message link]` — DM you the full translated thread for a specific message (paste a Slack message link)\n• `/ed viewers add @user1 @user2` — let colleagues privately see your translations here\n• `/ed viewers remove @user1` | `list` | `clear`\n• `/ed login` — authorize so your messages send without the "App" badge\n• `/ed logout` — remove your authorization';
 
   const isDM = command.channel_id.startsWith('D');
   async function reply(text) {
@@ -1328,90 +1329,6 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
         await setRemove(KEYS.monitoredChannels, command.channel_id);
         await reply('✅ This channel has been removed from monitoring.');
       }
-
-    } else if (subcommand === 'send') {
-      if (!args) {
-        await client.views.open({
-          trigger_id: command.trigger_id,
-          view: translateReplyModalView(command.channel_id, command.thread_ts),
-        });
-        return;
-      }
-
-      // Inline "[language] [link or text]" — skip the modal and post directly.
-      const [langToken, ...rest] = args.split(/\s+/);
-      let messageText = rest.join(' ').trim();
-      if (!messageText) {
-        await reply('❌ Usage: `/ed send [language] [link or text]` — e.g. `/ed send ja Hello!` or `/ed send vi [Slack message link]`');
-        return;
-      }
-
-      const targetCode = getLangCode(langToken);
-
-      const linkMatch = messageText.match(/\/archives\/([A-Z0-9]+)\/p(\d{10})(\d{6})/);
-      if (linkMatch) {
-        const linkedChannelId = linkMatch[1];
-        const ts = `${linkMatch[2]}.${linkMatch[3]}`;
-        let linkedMessage;
-        try {
-          const linkResult = await client.conversations.history({ channel: linkedChannelId, latest: ts, inclusive: true, limit: 1 });
-          linkedMessage = linkResult.messages?.[0];
-        } catch (_) {
-          linkedMessage = null;
-        }
-        if (!linkedMessage?.text) {
-          await reply('❌ Could not fetch that message. Make sure the bot is invited to that channel.');
-          return;
-        }
-        messageText = linkedMessage.text;
-      }
-
-      const translated = await translate(messageText, targetCode);
-
-      const profileRes = await client.users.info({ user: command.user_id });
-      const profile = profileRes.user?.profile;
-      const displayName = profile?.display_name || profile?.real_name || 'Unknown';
-      const avatarUrl = profile?.image_72;
-
-      const sent = await postAsUser(client, command.user_id, {
-        channel: command.channel_id,
-        text: translated,
-        username: displayName,
-        icon_url: avatarUrl,
-        ...(command.thread_ts ? { thread_ts: command.thread_ts } : {}),
-      });
-
-      // Confirmation with the original text — only visible to the sender.
-      // DMs get a persistent DM instead of an ephemeral (unreliable in DMs,
-      // same fix already applied for recap/trans); channels keep the ephemeral
-      // reply anchored to the thread of the sent message.
-      const sentTs = sent?.ts || sent?.message?.ts;
-      if (isDM) {
-        await client.chat.postMessage({
-          channel: command.user_id,
-          text: `✅ *Sent (→ ${targetCode})* — only you see this\n*Original:* ${messageText}`,
-        });
-      } else {
-        await client.chat.postEphemeral({
-          channel: command.channel_id,
-          user: command.user_id,
-          thread_ts: sentTs,
-          username: displayName,
-          icon_url: avatarUrl,
-          text: `✅ *Sent (→ ${targetCode})* — only you see this\n*Original:* ${messageText}`,
-        });
-      }
-
-      await notifyViewers(client, {
-        senderId: command.user_id,
-        channelId: command.channel_id,
-        threadTs: sentTs,
-        senderName: displayName,
-        senderAvatarUrl: avatarUrl,
-        originalText: messageText,
-        translatedBlocks: [{ type: 'rich_text_section', elements: [{ type: 'text', text: translated }] }],
-        targetLabel: targetCode,
-      });
 
     } else if (subcommand === 'trans') {
       // Modal is DM-only (that's where ephemeral delivery is unreliable); in a
@@ -1655,9 +1572,8 @@ app.command('/ed', async ({ command, ack, client, logger }) => {
         `*2. Monitor a channel*\n` +
         `Channels are watched automatically as soon as the bot is added to them — no extra step needed. Prefer manual control? Run \`/ed watch\`/\`/ed unwatch\`, or use the *Watched Channels* section in your Home tab (also lets you mute a channel for just yourself).\n\n` +
         `*3. Send translated messages*\n` +
-        `Run \`/ed send\` to open a modal — write your message, pick a language (optional), and post it translated to this channel.\n` +
-        `Or right-click any message → *More message shortcuts* → *Translate & Reply* to reply in thread the same way.\n` +
-        `💡 *Tip:* \`/ed send\` and \`/ed trans\` also work directly inside a 1:1 DM with a colleague, not just channels — handy for translating a private conversation between just the two of you.\n\n` +
+        `Right-click any message → *More message shortcuts* → *Translate & Reply* — write in your own language, pick a target language (optional), and the translated reply posts in that thread. The ✏️ *Reply with translation* button on your private auto-translations opens the same modal.\n` +
+        `💡 *Tip:* \`/ed trans\` also works directly inside a 1:1 DM with a colleague, not just channels — handy for translating a private conversation between just the two of you.\n\n` +
         `*4. Let teammates see your translations*\n` +
         `Run \`/ed viewers add @user1 @user2\`, or manage viewers directly from the *Viewers* section in your Home tab.\n\n` +
         `*5. Catch up on missed translations*\n` +
@@ -1962,7 +1878,7 @@ app.action('home_toggle_mute', async ({ ack, body, client, logger }) => {
   }
 });
 
-// ── App Home: set a channel's outgoing language for /ed send ───────────────
+// ── App Home: set a channel's outgoing language for posted translations ────
 app.action('home_set_channel_lang', async ({ ack, body, client, logger }) => {
   await ack();
   try {

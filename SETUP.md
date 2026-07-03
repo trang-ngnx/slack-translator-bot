@@ -2,7 +2,7 @@
 
 ## What it does
 - **Incoming**: Every message posted in your monitored channels is silently translated to English and shown only to you.
-- **Outgoing `/send`**: Type in any language → bot translates and posts to the channel. With `ANTHROPIC_API_KEY` set, outgoing translations are done by Claude using the surrounding thread as context — noticeably more natural than machine translation, especially for business Japanese.
+- **Outgoing replies**: Right-click a message → **Translate & Reply** (or the ✏️ button on an auto-translation) → write in your own language, and the bot posts the translation in that thread under your name. With `ANTHROPIC_API_KEY` set, these translations are done by Claude using the surrounding thread as context — noticeably more natural than machine translation, especially for business Japanese.
 - **On-demand `/translate`**: Paste a Slack message link → bot fetches and translates it privately (nothing posted).
 - **Forwarded messages**: Forward a message into a watched channel — as a new message or as a reply into an existing thread — and, if it's not already in that channel's outgoing language, the bot posts a visible translation in the same thread. Automatic, no command needed.
 
@@ -63,8 +63,8 @@ In your app settings → **Slash Commands** → **Create New Command**:
 
 - Command: `/ed`
 - Request URL: `https://YOUR-RAILWAY-URL.railway.app/slack/events`
-- Description: Translate messages — use `send` or `trans` as subcommands
-- Usage hint: `send | trans | recap | join | watch`
+- Description: Translate messages — use `trans`, `recap`, `join` as subcommands
+- Usage hint: `trans | recap | join | watch`
 
 > All bot actions go through a single `/ed` command. The word after `/ed` determines what it does.
 
@@ -83,7 +83,7 @@ In your app settings → **Slash Commands** → **Create New Command**:
    - `OUTGOING_LANGUAGE` (optional, default: English)
    - `PROTECTED_TERMS` (optional — comma-separated brand/product/person names that should never be translated, e.g. `YourBrand,ClientName`)
    - `CANVAS_URL` (optional — link to an internal onboarding canvas/doc; shown in `/ed newbie` and the Home tab if set, omitted otherwise)
-   - `ANTHROPIC_API_KEY` (optional, recommended — routes **outgoing** translations (`/ed send` and thread replies) through Claude instead of Google. Claude reads the surrounding thread for context and produces natural, business-appropriate phrasing. Get a key at https://platform.claude.com. If unset or a request fails, outgoing messages silently fall back to Google Translate. `CLAUDE_MODEL` optionally overrides the model, default `claude-opus-4-8`.)
+   - `ANTHROPIC_API_KEY` (optional, recommended — routes **outgoing** translated replies (*Translate & Reply*) through Claude instead of Google. Claude reads the surrounding thread for context and produces natural, business-appropriate phrasing. Get a key at https://platform.claude.com. If unset or a request fails, outgoing messages silently fall back to Google Translate. `CLAUDE_MODEL` optionally overrides the model, default `claude-opus-4-8`.)
 4. Railway auto-deploys. Go to **Settings → Networking → Generate Domain** to get your URL
 5. **Go back to Steps 2 & 3** and paste your Railway URL into Slack's Event Subscriptions and Slash Command request URLs
 
@@ -140,7 +140,7 @@ Open the bot's **Home** tab (click its name → Home) for a visual settings scre
 | What you want | What to do |
 |---|---|
 | Translate a message or link privately | `/ed trans` → opens a modal, paste text or a Slack message link, pick a language (optional) |
-| Post a translated message in a channel or thread | `/ed send` → opens a modal, write your message, pick a language (optional) |
+| Post a translated reply in a thread | Right-click a message → **Translate & Reply** (or the ✏️ button on an auto-translation) → write your message, pick a language (optional) |
 
 ## For new users / colleagues
 
