@@ -1179,9 +1179,10 @@ app.event('message', async ({ event, client, logger }) => {
       return;
     }
 
-    // Fetch sender's display name once for all subscribers
+    // Fetch sender's display name + avatar once for all subscribers
     const senderInfo = await client.users.info({ user: event.user });
     const senderName = senderInfo.user?.profile?.display_name || senderInfo.user?.profile?.real_name || 'Someone';
+    const senderAvatar = senderInfo.user?.profile?.image_72;
 
     for (const userId of allSubscribers) {
       if (userId === event.user) continue;
@@ -1217,15 +1218,19 @@ app.event('message', async ({ event, client, logger }) => {
         // behavior (threading only actual thread replies) so translations stay
         // in the main conversation view there.
         const anchorToThread = isThreadReply || !event.channel.startsWith('D');
+        // Show as the sender (name + avatar + APP badge), matching notifyViewers —
+        // not as the bot's app identity with the name inlined in the text
         await client.chat.postEphemeral({
           channel: event.channel,
           user: userId,
           ...(anchorToThread ? { thread_ts: threadTs } : {}),
-          text: `🌐 *[${senderName}]* ${translated}`,
+          username: senderName,
+          ...(senderAvatar ? { icon_url: senderAvatar } : {}),
+          text: `🌐 ${translated}`,
           blocks: [
             {
               type: 'section',
-              text: { type: 'mrkdwn', text: `🌐 *[${senderName}]* ${translated}` },
+              text: { type: 'mrkdwn', text: `🌐 ${translated}` },
             },
             { type: 'actions', elements: actionButtons },
           ],
