@@ -1149,7 +1149,10 @@ app.event('message', async ({ event, client, logger }) => {
       }
     }
 
-    if (event.subtype || event.bot_id) { logger.info('[msg] skipped: subtype/bot'); return; }
+    // file_share is a normal user message that happens to carry files — the
+    // typed text still arrives in event.text, so let it through. Other
+    // subtypes (joins, edits, bot_message, …) stay excluded as before.
+    if ((event.subtype && event.subtype !== 'file_share') || event.bot_id) { logger.info('[msg] skipped: subtype/bot'); return; }
     if (!event.text?.trim()) { logger.info('[msg] skipped: no text'); return; }
 
     const isMonitoredChannel = await setHas(KEYS.monitoredChannels, event.channel);
