@@ -1185,7 +1185,11 @@ app.event('message', async ({ event, client, logger }) => {
     const senderAvatar = senderInfo.user?.profile?.image_72;
 
     for (const userId of allSubscribers) {
-      if (userId === event.user) continue;
+      // The sender is deliberately NOT skipped: a subscriber writing in a
+      // language other than their own target (e.g. typing Japanese while set
+      // to English) still gets the private translation of their own message,
+      // so they can verify what they sent. Messages already in their target
+      // language are filtered out by the detectedLang check below anyway.
 
       // Isolated per-subscriber: subscribing is global, not scoped to specific
       // channels, so a subscriber who isn't actually a member of this channel
